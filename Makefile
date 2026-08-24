@@ -13,14 +13,21 @@ test: build
 	./bin/test_sha256sw
 
 formal:
-	cd formal && $(PYTHON) generate_smt_proofs.py
+	@echo "Generating formal SMT-LIB2 proof obligations..."
+	@cd formal && $(PYTHON) generate_smt_proofs.py
 	@if command -v z3 >/dev/null 2>&1; then \
-		echo "Running formal SMT verification via Z3..."; \
-		z3 formal/ch_equiv.smt2; \
-		z3 formal/full_64round_equiv.smt2; \
-		z3 formal/full_64round_inverse.smt2; \
+		echo "Executing formal SMT verification via Z3..."; \
+		for f in formal/ch_equiv.smt2 formal/full_64round_equiv.smt2 formal/full_64round_inverse.smt2; do \
+			res=$$(z3 "$$f"); \
+			echo "  $$f -> $$res"; \
+			if [ "$$res" != "unsat" ]; then \
+				echo "[ERROR] Formal proof failed for $$f (expected unsat, got $$res)"; \
+				exit 1; \
+			fi; \
+		done; \
+		echo "[PASS] All formal SMT proofs verified strictly (UNSAT)."; \
 	else \
-		echo "Z3 not found. Proofs generated in formal/"; \
+		echo "[!] Z3 not found in PATH. SMT-LIB2 proof obligations generated in formal/"; \
 	fi
 
 benchmark:
