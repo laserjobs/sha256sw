@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up C and Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Z3 Solver
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y z3 libz3-dev
+
+    - name: Build & Run C Empirical Test Suite
+      run: make test
+
+    - name: Run Formal Equivalence Proofs
+      run: make formal
+
+    - name: Execute Fast Gate 0 & Reduced Benchmark (16-20 Rounds)
+      run: |
+        python3 benchmark/sha256_representation_benchmark.py z3 --rounds 16 20 --trials 1 --timeout 30
