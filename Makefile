@@ -1,39 +1,83 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2
-INCLUDES = -Iinclude
+
+INCLUDES := -Iinclude
+
 PYTHON ?= python3
+SOLVER ?= z3
+
+BIN_DIR := bin
+TEST_BIN := $(BIN_DIR)/test_sha256sw
+
+ROUNDS ?= 16 20 24 28 30
+TRIALS ?= 5
+TIMEOUT ?= 180
 
 all: test
 
+
 build:
-	@mkdir -p bin
-	$(CC) $(CFLAGS) $(INCLUDES) src/sha256sw.c tests/test_sha256sw.c -o bin/test_sha256sw
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) \
+		src/sha256sw.c \
+		tests/test_sha256sw.c \
+		-o $(TEST_BIN)
+
 
 test: build
-	./bin/test_sha256sw
+	./$(TEST_BIN)
+
 
 formal:
-	@echo "Generating formal SMT-LIB2 proof obligations..."
-	@cd formal && $(PYTHON) generate_smt_proofs.py
-	@if command -v z3 >/dev/null 2>&1; then \
-		echo "Executing formal SMT verification via Z3..."; \
-		for f in formal/ch_equiv.smt2 formal/full_64round_equiv.smt2 formal/full_64round_inverse.smt2; do \
-			res=$$(z3 "$$f"); \
-			echo "  $$f -> $$res"; \
-			if [ "$$res" != "unsat" ]; then \
-				echo "[ERROR] Formal proof failed for $$f (expected unsat, got $$res)"; \
-				exit 1; \
-			fi; \
-		done; \
-		echo "[PASS] All formal SMT proofs verified strictly (UNSAT)."; \
-	else \
-		echo "[!] Z3 not found in PATH. SMT-LIB2 proof obligations generated in formal/"; \
-	fi
+	$(PYTHON) formal/generate_smt_proofs.py
+	@command -v $(SOLVER) >/dev/null 2>&1 || \
+		{ echo "ERROR: $(SOLVER) not found"; exit 1; }
+	@echo "Checking Ch equivalence..."
+	@$(SOLVER) formal/ch_equiv.smt2 | grep -qx "unsat"
+	@echo "Checking 64-round Std/SW equivalence..."
+	@$(SOLVER) formal/full_64round_equiv.smt2 | grep -qx "unsat"
+	@echo "Checking inverse bijection..."
+	@$(SOLVER) formal/full_64round_inverse.smt2 | grep -qx "unsat"
+	@echo "ALL FORMAL CHECKS PASSED"
+
 
 benchmark:
-	$(PYTHON) benchmark/sha256_representation_benchmark.py z3 --rounds 16 20 24 28 30 --trials 3 --timeout 120
+	$(PYTHON) benchmark/sha256_representation_benchmark.py \
+		$(SOLVER) \
+		--rounds $(ROUNDS) \
+		--trials $(TRIALS) \
+		--timeout $(TIMEOUT)
+
+
+benchmark-z3:
+	$(MAKE) benchmark SOLVER=z3
+
+
+benchmark-bitwuzla:
+	$(MAKE) benchmark SOLVER=bitwuzla
+
+
+benchmark-cvc5:
+	$(MAKE) benchmark SOLVER=cvc5
+
 
 clean:
-	rm -rf bin/ *.o *.smt2 formal/*.smt2 *.json *.csv tmp_*.smt2 gate0_*.smt2
+	rm -rf $(BIN_DIR)
+	rm -f *.o
+	rm -f *.smt2
+	rm -f formal/*.smt2
+	rm -f *.json
+	rm -f *.csv
+	rm -f tmp_*.smt2
+	rm -f gate0_*.smt2
 
-.PHONY: all build test formal benchmark clean
+
+.PHONY: all \
+	build \
+	test \
+	formal \
+	benchmark \
+	benchmark-z3 \
+	benchmark-bitwuzla \
+	benchmark-cvc5 \
+	clean
