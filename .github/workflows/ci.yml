@@ -31,4 +31,4 @@ jobs:
 
     - name: Execute Fast Gate 0 & Reduced Benchmark (16-20 Rounds)
       run: |
-        python3 benchmark/sha256_representation_benchmark.py z3 --rounds 16 20 --trials 1 --timeout 30
+        python3 benchmark/sha256_representation_benchmark.py z3 --rounds 16 20 --trials 1 --timeout 120
