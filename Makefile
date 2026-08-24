@@ -19,8 +19,8 @@ formal:
 		z3 -version; \
 		echo "==> Checking formal/ch_equiv.smt2"; \
 		z3 formal/ch_equiv.smt2; \
-		echo "==> Checking formal/one_round_equiv.smt2"; \
-		z3 formal/one_round_equiv.smt2; \
+		echo "==> Checking formal/full_64round_equiv.smt2"; \
+		z3 formal/full_64round_equiv.smt2; \
 		echo "==> Checking formal/full_64round_inverse.smt2"; \
 		z3 formal/full_64round_inverse.smt2; \
 	else \
