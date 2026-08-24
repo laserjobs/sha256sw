@@ -1,26 +1,8 @@
 #!/usr/bin/env python3
-"""
-generate_smt_proofs.py
-
-Generate SMT-LIB2 proof obligations for SHA256SW.
-
-Generated files:
-
-    ch_equiv.smt2
-        Proves arithmetic and XOR forms of Ch equivalent.
-
-    full_64round_equiv.smt2
-        Proves the complete 64-round standard and sliding-window
-        state representations are equivalent for arbitrary symbolic
-        IV and message words.
-
-    full_64round_inverse.smt2
-        Proves the single-step sliding-window recurrence is algebraically
-        invertible with respect to the oldest state coordinates.
-"""
 
 from pathlib import Path
 
+OUT = Path(__file__).resolve().parent
 
 K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
@@ -42,266 +24,18 @@ K = [
 ]
 
 assert len(K) == 64
-assert K[34] == 0x4d2c6dfc
-assert K[37] == 0x766a0abb
 
 
-ROOT = Path(__file__).resolve().parent
-
-
-def write_file(name: str, content: str) -> None:
-    path = ROOT / name
-    path.write_text(content, encoding="utf-8")
-    print(f"[+] Generated {path}")
-
-
-def generate_ch_equiv() -> None:
-    content = """\
-; SMT-LIB2: Ch arithmetic vs bitwise equivalence
-
+PREAMBLE = r"""
 (set-logic QF_BV)
 
-(declare-const x (_ BitVec 32))
-(declare-const y (_ BitVec 32))
-(declare-const z (_ BitVec 32))
-
-(define-fun ch_arith
-  ((x (_ BitVec 32))
-   (y (_ BitVec 32))
-   (z (_ BitVec 32)))
-  (_ BitVec 32)
-  (bvadd
-    (bvand x y)
-    (bvand (bvnot x) z)))
-
-(define-fun ch_xor
-  ((x (_ BitVec 32))
-   (y (_ BitVec 32))
-   (z (_ BitVec 32)))
-  (_ BitVec 32)
-  (bvxor
-    (bvand x y)
-    (bvand (bvnot x) z)))
-
-(assert
-  (distinct
-    (ch_arith x y z)
-    (ch_xor x y z)))
-
-(check-sat)
-(exit)
-"""
-    write_file("ch_equiv.smt2", content)
-
-
-def generate_full_64round() -> None:
-    lines = [
-        "(set-logic QF_BV)",
-        "",
-        "(define-fun rotr32 "
-        "((x (_ BitVec 32)) "
-        "(n (_ BitVec 32))) "
-        "(_ BitVec 32)",
-        "  (bvor "
-        "    (bvlshr x n) "
-        "    (bvshl x "
-        "      (bvsub (_ bv32 32) n))))",
-        "",
-        "(define-fun s0 "
-        "((x (_ BitVec 32))) "
-        "(_ BitVec 32)",
-        "  (bvxor "
-        "    (rotr32 x (_ bv2 32)) "
-        "    (bvxor "
-        "      (rotr32 x (_ bv13 32)) "
-        "      (rotr32 x (_ bv22 32)))))",
-        "",
-        "(define-fun s1 "
-        "((x (_ BitVec 32))) "
-        "(_ BitVec 32)",
-        "  (bvxor "
-        "    (rotr32 x (_ bv6 32)) "
-        "    (bvxor "
-        "      (rotr32 x (_ bv11 32)) "
-        "      (rotr32 x (_ bv25 32)))))",
-        "",
-        "(define-fun ch_f "
-        "((x (_ BitVec 32)) "
-        "(y (_ BitVec 32)) "
-        "(z (_ BitVec 32))) "
-        "(_ BitVec 32)",
-        "  (bvadd "
-        "    (bvand x y) "
-        "    (bvand (bvnot x) z)))",
-        "",
-        "(define-fun maj_f "
-        "((x (_ BitVec 32)) "
-        "(y (_ BitVec 32)) "
-        "(z (_ BitVec 32))) "
-        "(_ BitVec 32)",
-        "  (bvxor "
-        "    (bvand x y) "
-        "    (bvxor "
-        "      (bvand x z) "
-        "      (bvand y z))))",
-        "",
-    ]
-
-    for name in "abcdefgh":
-        lines.append(
-            f"(declare-const {name}_0 "
-            "(_ BitVec 32))"
-        )
-
-    for i in range(64):
-        lines.append(
-            f"(declare-const w_{i} "
-            "(_ BitVec 32))"
-        )
-
-    for i in range(64):
-        k = f"#x{K[i]:08x}"
-
-        lines.extend([
-            f"(define-fun t1_std_{i} () "
-            "(_ BitVec 32) "
-            f"(bvadd h_{i} "
-            f"(bvadd (s1 e_{i}) "
-            f"(bvadd "
-            f"(ch_f e_{i} f_{i} g_{i}) "
-            f"(bvadd {k} w_{i})))))",
-
-            f"(define-fun t2_std_{i} () "
-            "(_ BitVec 32) "
-            f"(bvadd "
-            f"(s0 a_{i}) "
-            f"(maj_f a_{i} b_{i} c_{i})))",
-
-            f"(define-fun a_{i+1} () "
-            "(_ BitVec 32) "
-            f"(bvadd t1_std_{i} t2_std_{i}))",
-
-            f"(define-fun b_{i+1} () "
-            "(_ BitVec 32) a_{i})",
-
-            f"(define-fun c_{i+1} () "
-            "(_ BitVec 32) b_{i})",
-
-            f"(define-fun d_{i+1} () "
-            "(_ BitVec 32) c_{i})",
-
-            f"(define-fun e_{i+1} () "
-            "(_ BitVec 32) "
-            f"(bvadd d_{i} t1_std_{i}))",
-
-            f"(define-fun f_{i+1} () "
-            "(_ BitVec 32) e_{i})",
-
-            f"(define-fun g_{i+1} () "
-            "(_ BitVec 32) f_{i})",
-
-            f"(define-fun h_{i+1} () "
-            "(_ BitVec 32) g_{i})",
-        ])
-
-    lines.extend([
-        "",
-        "(define-fun a_mt_0 () "
-        "(_ BitVec 32) d_0)",
-        "(define-fun a_mt_1 () "
-        "(_ BitVec 32) c_0)",
-        "(define-fun a_mt_2 () "
-        "(_ BitVec 32) b_0)",
-        "(define-fun a_mt_3 () "
-        "(_ BitVec 32) a_0)",
-
-        "(define-fun b_mt_0 () "
-        "(_ BitVec 32) h_0)",
-        "(define-fun b_mt_1 () "
-        "(_ BitVec 32) g_0)",
-        "(define-fun b_mt_2 () "
-        "(_ BitVec 32) f_0)",
-        "(define-fun b_mt_3 () "
-        "(_ BitVec 32) e_0)",
-        "",
-    ])
-
-    for i in range(64):
-        k = f"#x{K[i]:08x}"
-
-        lines.extend([
-            f"(define-fun t1_sw_{i} () "
-            "(_ BitVec 32) "
-            f"(bvadd b_mt_{i} "
-            f"(bvadd "
-            f"(s1 b_mt_{i+3}) "
-            f"(bvadd "
-            f"(ch_f b_mt_{i+3} "
-            f"b_mt_{i+2} "
-            f"b_mt_{i+1}) "
-            f"(bvadd {k} w_{i})))))",
-
-            f"(define-fun b_mt_{i+4} () "
-            "(_ BitVec 32) "
-            f"(bvadd t1_sw_{i} "
-            f"a_mt_{i}))",
-
-            f"(define-fun t2_sw_{i} () "
-            "(_ BitVec 32) "
-            f"(bvadd "
-            f"(s0 a_mt_{i+3}) "
-            f"(maj_f "
-            f"a_mt_{i+3} "
-            f"a_mt_{i+2} "
-            f"a_mt_{i+1})))",
-
-            f"(define-fun a_mt_{i+4} () "
-            "(_ BitVec 32) "
-            f"(bvadd "
-            f"(bvsub "
-            f"b_mt_{i+4} a_mt_{i}) "
-            f"t2_sw_{i}))",
-        ])
-
-    lines.extend([
-        "",
-        "(assert (or",
-        "  (distinct a_64 a_mt_67)",
-        "  (distinct b_64 a_mt_66)",
-        "  (distinct c_64 a_mt_65)",
-        "  (distinct d_64 a_mt_64)",
-        "  (distinct e_64 b_mt_67)",
-        "  (distinct f_64 b_mt_66)",
-        "  (distinct g_64 b_mt_65)",
-        "  (distinct h_64 b_mt_64)))",
-        "",
-        "(check-sat)",
-        "(exit)",
-    ])
-
-    write_file(
-        "full_64round_equiv.smt2",
-        "\n".join(lines) + "\n",
-    )
-
-
-def generate_inverse_step() -> None:
-    content = """\
-; SMT-LIB2: Single-step algebraic inverse bijection
-
-(set-logic QF_BV)
-
-(define-fun rotr32
-  ((x (_ BitVec 32))
-   (n (_ BitVec 32)))
+(define-fun rotr32 ((x (_ BitVec 32)) (n (_ BitVec 32)))
   (_ BitVec 32)
   (bvor
     (bvlshr x n)
-    (bvshl x
-      (bvsub (_ bv32 32) n))))
+    (bvshl x (bvsub (_ bv32 32) n))))
 
-(define-fun s0
-  ((x (_ BitVec 32)))
+(define-fun S0 ((x (_ BitVec 32)))
   (_ BitVec 32)
   (bvxor
     (rotr32 x (_ bv2 32))
@@ -309,8 +43,7 @@ def generate_inverse_step() -> None:
       (rotr32 x (_ bv13 32))
       (rotr32 x (_ bv22 32)))))
 
-(define-fun s1
-  ((x (_ BitVec 32)))
+(define-fun S1 ((x (_ BitVec 32)))
   (_ BitVec 32)
   (bvxor
     (rotr32 x (_ bv6 32))
@@ -318,26 +51,150 @@ def generate_inverse_step() -> None:
       (rotr32 x (_ bv11 32))
       (rotr32 x (_ bv25 32)))))
 
-(define-fun ch_f
-  ((x (_ BitVec 32))
-   (y (_ BitVec 32))
-   (z (_ BitVec 32)))
+(define-fun Ch ((x (_ BitVec 32))
+                (y (_ BitVec 32))
+                (z (_ BitVec 32)))
   (_ BitVec 32)
-  (bvadd
+  (bvxor
     (bvand x y)
     (bvand (bvnot x) z)))
 
-(define-fun maj_f
-  ((x (_ BitVec 32))
-   (y (_ BitVec 32))
-   (z (_ BitVec 32)))
+(define-fun Maj ((x (_ BitVec 32))
+                 (y (_ BitVec 32))
+                 (z (_ BitVec 32)))
   (_ BitVec 32)
   (bvxor
     (bvand x y)
     (bvxor
       (bvand x z)
       (bvand y z))))
+"""
 
+
+def ch_equiv():
+    return PREAMBLE + r"""
+(declare-const x (_ BitVec 32))
+(declare-const y (_ BitVec 32))
+(declare-const z (_ BitVec 32))
+
+(define-fun ch_add ((x (_ BitVec 32))
+                    (y (_ BitVec 32))
+                    (z (_ BitVec 32)))
+  (_ BitVec 32)
+  (bvadd
+    (bvand x y)
+    (bvand (bvnot x) z)))
+
+(assert (distinct
+  (ch_add x y z)
+  (Ch x y z)))
+
+(check-sat)
+(exit)
+"""
+
+
+def one_round_equiv():
+    lines = [PREAMBLE]
+
+    for name in "abcdefgh":
+        lines.append(
+            f"(declare-const {name} (_ BitVec 32))"
+        )
+
+    lines.append("(declare-const w (_ BitVec 32))")
+    lines.append("(declare-const k (_ BitVec 32))")
+
+    # Standard SHA-256 transition.
+    lines += [
+        r"""
+(define-fun t1_std () (_ BitVec 32)
+  (bvadd h
+    (bvadd
+      (S1 e)
+      (bvadd
+        (Ch e f g)
+        (bvadd k w)))))
+
+(define-fun t2_std () (_ BitVec 32)
+  (bvadd
+    (S0 a)
+    (Maj a b c)))
+
+(define-fun A () (_ BitVec 32)
+  (bvadd t1_std t2_std))
+
+(define-fun B () (_ BitVec 32) a)
+(define-fun C () (_ BitVec 32) b)
+(define-fun D () (_ BitVec 32) c)
+(define-fun E () (_ BitVec 32) (bvadd d t1_std))
+(define-fun F () (_ BitVec 32) e)
+(define-fun G () (_ BitVec 32) f)
+(define-fun H () (_ BitVec 32) g)
+
+; Sliding-window representation:
+;
+; a3 = A
+; a2 = B
+; a1 = C
+; a0 = D
+;
+; b3 = E
+; b2 = F
+; b1 = G
+; b0 = H
+
+(define-fun a0 () (_ BitVec 32) d)
+(define-fun a1 () (_ BitVec 32) c)
+(define-fun a2 () (_ BitVec 32) b)
+(define-fun a3 () (_ BitVec 32) a)
+
+(define-fun b0 () (_ BitVec 32) h)
+(define-fun b1 () (_ BitVec 32) g)
+(define-fun b2 () (_ BitVec 32) f)
+(define-fun b3 () (_ BitVec 32) e)
+
+(define-fun t1_sw () (_ BitVec 32)
+  (bvadd b0
+    (bvadd
+      (S1 b3)
+      (bvadd
+        (Ch b3 b2 b1)
+        (bvadd k w)))))
+
+(define-fun b4 () (_ BitVec 32)
+  (bvadd t1_sw a0))
+
+(define-fun t2_sw () (_ BitVec 32)
+  (bvadd
+    (S0 a3)
+    (Maj a3 a2 a1)))
+
+(define-fun a4 () (_ BitVec 32)
+  (bvadd
+    (bvsub b4 a0)
+    t2_sw))
+
+(assert (or
+  (distinct A a4)
+  (distinct B a3)
+  (distinct C a2)
+  (distinct D a1)
+  (distinct E b4)
+  (distinct F b3)
+  (distinct G b2)
+  (distinct H b1)))
+
+(check-sat)
+(exit)
+"""
+    ]
+
+    return "\n".join(lines)
+
+
+def inverse_equiv():
+    return PREAMBLE + r"""
 (declare-const a_i (_ BitVec 32))
 (declare-const a_ip1 (_ BitVec 32))
 (declare-const a_ip2 (_ BitVec 32))
@@ -351,77 +208,63 @@ def generate_inverse_step() -> None:
 (declare-const k_i (_ BitVec 32))
 (declare-const w_i (_ BitVec 32))
 
-(define-fun t1_fwd
-  () (_ BitVec 32)
+(define-fun t1_fwd () (_ BitVec 32)
   (bvadd b_i
     (bvadd
-      (s1 b_ip3)
+      (S1 b_ip3)
       (bvadd
-        (ch_f b_ip3 b_ip2 b_ip1)
+        (Ch b_ip3 b_ip2 b_ip1)
         (bvadd k_i w_i)))))
 
-(define-fun b_ip4
-  () (_ BitVec 32)
+(define-fun b_ip4 () (_ BitVec 32)
   (bvadd t1_fwd a_i))
 
-(define-fun t2_fwd
-  () (_ BitVec 32)
+(define-fun t2_fwd () (_ BitVec 32)
   (bvadd
-    (s0 a_ip3)
-    (maj_f a_ip3 a_ip2 a_ip1)))
+    (S0 a_ip3)
+    (Maj a_ip3 a_ip2 a_ip1)))
 
-(define-fun a_ip4
-  () (_ BitVec 32)
+(define-fun a_ip4 () (_ BitVec 32)
   (bvadd
     (bvsub b_ip4 a_i)
     t2_fwd))
 
-(define-fun t2_rec
-  () (_ BitVec 32)
-  (bvadd
-    (s0 a_ip3)
-    (maj_f a_ip3 a_ip2 a_ip1)))
+; Recover T1 from A[i+4].
+(define-fun t1_rec () (_ BitVec 32)
+  (bvsub a_ip4 t2_fwd))
 
-(define-fun t1_rec
-  () (_ BitVec 32)
-  (bvsub a_ip4 t2_rec))
-
-(define-fun a_i_rec
-  () (_ BitVec 32)
+; Recover A[i].
+(define-fun a_i_rec () (_ BitVec 32)
   (bvsub b_ip4 t1_rec))
 
-(define-fun b_i_rec
-  () (_ BitVec 32)
+; Recover B[i].
+(define-fun b_i_rec () (_ BitVec 32)
   (bvsub
     t1_rec
     (bvadd
-      (s1 b_ip3)
+      (S1 b_ip3)
       (bvadd
-        (ch_f b_ip3 b_ip2 b_ip1)
+        (Ch b_ip3 b_ip2 b_ip1)
         (bvadd k_i w_i)))))
 
-(assert
-  (or
-    (distinct a_i a_i_rec)
-    (distinct b_i b_i_rec)))
+(assert (or
+  (distinct a_i a_i_rec)
+  (distinct b_i b_i_rec)))
 
 (check-sat)
 (exit)
 """
-    write_file(
-        "full_64round_inverse.smt2",
-        content,
-    )
 
 
-def main() -> int:
-    generate_ch_equiv()
-    generate_full_64round()
-    generate_inverse_step()
-
-    print("[+] SMT proof artifacts generated.")
-    return 0
+def write(name, content):
+    path = OUT / name
+    path.write_text(content)
+    print(f"[+] Generated {path}")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    write("ch_equiv.smt2", ch_equiv())
+    write("one_round_equiv.smt2", one_round_equiv())
+    write("full_64round_inverse.smt2", inverse_equiv())
+
+    print("[+] SMT proof artifacts generated.")
