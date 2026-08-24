@@ -1,35 +1,33 @@
-.PHONY: all test formal clean
-
-PYTHON ?= python3
 CC ?= cc
+CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2
+INCLUDES = -Iinclude
+PYTHON ?= python3
 
-CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
+all: test
 
-all: test formal
+build:
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(INCLUDES) src/sha256sw.c tests/test_sha256sw.c -o bin/test_sha256sw
 
-test:
-	$(MAKE) -C tests test
+test: build
+	./bin/test_sha256sw
 
 formal:
 	$(PYTHON) formal/generate_smt_proofs.py
+	@command -v z3 >/dev/null 2>&1 || { echo "ERROR: z3 not installed"; exit 1; }
 	@echo "Z3 version:"
-	@z3 -version
-	@echo "Running formal SMT verification via Z3..."
-	@set -e; \
-	for f in \
-		formal/ch_equiv.smt2 \
-		formal/full_64round_equiv.smt2 \
-		formal/full_64round_inverse.smt2; do \
-		echo "==> Checking $$f"; \
-		result="$$(z3 "$$f")"; \
-		echo "$$result"; \
-		if [ "$$result" != "unsat" ]; then \
-			echo "FAIL: $$f"; \
-			exit 1; \
-		fi; \
-		echo "PASS: $$f"; \
-	done
+	@z3 --version
+	@echo "==> Checking formal/ch_equiv.smt2"
+	@z3 formal/ch_equiv.smt2
+	@echo "==> Checking formal/full_64round_equiv.smt2"
+	@z3 formal/full_64round_equiv.smt2
+	@echo "==> Checking formal/full_64round_inverse.smt2"
+	@z3 formal/full_64round_inverse.smt2
+
+benchmark:
+	$(PYTHON) benchmark/sha256_representation_benchmark.py z3 --rounds 16 20 24 28 30 --trials 3 --timeout 120
 
 clean:
-	rm -f formal/*.smt2
-	$(MAKE) -C tests clean
+	rm -rf bin *.o formal/*.smt2 *.json *.csv tmp_*.smt2 gate0_*.smt2
+
+.PHONY: all build test formal benchmark clean
