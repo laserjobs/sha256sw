@@ -1,0 +1,19 @@
+# Binaries and build artifacts
+bin/
+*.o
+*.a
+*.so
+
+# SMT temporary files
+*.smt2
+gate0_*.smt2
+tmp_*.smt2
+
+# Benchmark outputs
+*.json
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
