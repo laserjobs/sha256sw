@@ -31,10 +31,22 @@ test: build
 formal:
 	$(PYTHON) formal/generate_smt_proofs.py
 	@if command -v z3 >/dev/null 2>&1; then \
+		set -e; \
 		echo "Running formal SMT verification via Z3..."; \
-		z3 formal/ch_equiv.smt2; \
-		z3 formal/full_64round_equiv.smt2; \
-		z3 formal/full_64round_inverse.smt2; \
+		for proof in \
+			formal/ch_equiv.smt2 \
+			formal/full_64round_equiv.smt2 \
+			formal/full_64round_inverse.smt2; do \
+			echo "==> Checking $$proof"; \
+			result="$$(z3 "$$proof")"; \
+			printf '%s\n' "$$result"; \
+			if [ "$$result" != "unsat" ]; then \
+				echo "ERROR: $$proof did not prove UNSAT"; \
+				exit 1; \
+			fi; \
+			echo "PASS: $$proof"; \
+		done; \
+		echo "ALL FORMAL CHECKS PASSED"; \
 	else \
 		echo "Z3 not found. Proofs generated in formal/"; \
 	fi
