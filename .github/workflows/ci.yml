@@ -2,33 +2,169 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test-and-verify:
+  test:
+    name: C tests
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-    - name: Set up C and Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install Z3 Solver
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y z3 libz3-dev
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            z3 \
+            libz3-dev
 
-    - name: Build & Run C Empirical Test Suite
-      run: make test
+      - name: Show tool versions
+        run: |
+          python3 --version
+          cc --version
+          z3 --version
+          make --version
 
-    - name: Run Formal Equivalence Proofs
-      run: make formal
+      - name: Build and run C test suite
+        run: make test
 
-    - name: Execute Fast Gate 0 & Reduced Benchmark (16-20 Rounds)
-      run: |
-        python3 benchmark/sha256_representation_benchmark.py z3 --rounds 2 3 4 5 6 8 --trials 1 --timeout 60
+  formal:
+    name: Formal verification
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3
+
+      - name: Run formal verification
+        run: make formal
+
+      - name: Verify generated SMT files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          files=(formal/*.smt2)
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "ERROR: no SMT2 proof files were generated"
+            exit 1
+          fi
+
+          echo "Generated SMT files:"
+          printf '  %s\n' "${files[@]}"
+
+  benchmark-equivalence:
+    name: Symbolic equivalence benchmark
+    runs-on: ubuntu-latest
+    needs: formal
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3
+
+      - name: Run Python syntax check
+        run: |
+          python3 -m py_compile \
+            benchmark/sha256_representation_benchmark.py
+
+      - name: Run equivalence benchmark
+        run: |
+          python3 benchmark/sha256_representation_benchmark.py \
+            z3 \
+            --mode equiv \
+            --equiv-rounds 2 4 8 16 \
+            --trials 1 \
+            --equiv-timeout 30
+
+      - name: Check benchmark exports
+        run: |
+          test -s sha256sw_benchmark.json
+          test -s sha256sw_benchmark.csv
+
+  benchmark-collision:
+    name: Reduced-round collision benchmark
+    runs-on: ubuntu-latest
+    needs: formal
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3
+
+      - name: Run collision benchmark
+        run: |
+          python3 benchmark/sha256_representation_benchmark.py \
+            z3 \
+            --mode collision \
+            --rounds 16 20 \
+            --trials 1 \
+            --timeout 30
+
+      - name: Check benchmark exports
+        run: |
+          test -s sha256sw_benchmark.json
+          test -s sha256sw_benchmark.csv
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sw-benchmark-results
+          path: |
+            sha256sw_benchmark.json
+            sha256sw_benchmark.csv
+          if-no-files-found: warn
