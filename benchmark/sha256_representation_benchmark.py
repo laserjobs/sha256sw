@@ -2,39 +2,60 @@
 """
 sha256_representation_benchmark.py
 
-Comparative cryptanalytic and constraint-modeling benchmark for SHA-256.
+Comparative benchmark for SHA-256 standard-state and sliding-window
+representations.
 
-Methodological structure:
+Modes:
 
-  Static validation
-      Verify FIPS 180-4 constants and basic invariants.
+  collision
+      Existing cryptanalytic-style collision/search benchmark.
+      The solver searches for two distinct message blocks satisfying
+      the configured differential constraints and producing the same
+      reduced-round compression output.
 
-  Phase 0
-      Direct Python verification of the standard and sliding-window
-      recurrences at 16, 32, and 64 rounds.
+  equiv
+      Pure symbolic representation-equivalence benchmark.
 
-  Gate 0
-      Formal symbolic equivalence:
-          Std == SW
+      The solver searches for:
+
+          Std(R, IV, W) != SW(R, IV, W)
+
       for arbitrary symbolic IV and message words.
 
+      SAT   = counterexample found
+      UNSAT = representations are symbolically equivalent
+
+      This mode intentionally removes the collision-search problem so
+      that solver behavior primarily reflects the representation of
+      the SHA-256 transition system.
+
+Validation structure:
+
+  Phase 0
+      Independent Python recurrence checks.
+
+  Gate 0
+      One-round symbolic equivalence check.
+
   Phase 1
-      Randomized multi-trial solver benchmark:
-          Std-Explicit
-          SW-Explicit
-          Std-Inline
-          SW-Inline
+      Selected benchmark mode.
 
   Phase 2
-      Independent pure-Python verification of every SAT witness.
+      Independent verification of SAT witnesses in collision mode.
 
   Phase 3
-      Structured JSON/CSV export.
+      JSON/CSV export.
 
 IMPORTANT:
+
     Runtime measured here is end-to-end solver process wall-clock time,
-    including SMT-LIB parsing and model generation. It is NOT a direct
-    measurement of internal CDCL conflict-processing time.
+    including SMT-LIB parsing and model generation.
+
+    It is NOT a direct measurement of internal CDCL conflict-processing
+    time.
+
+    Equivalence mode is intended to measure symbolic representation
+    complexity, not cryptanalytic hardness.
 """
 
 from __future__ import annotations
@@ -52,13 +73,34 @@ import time
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 
 # ============================================================================
 # FIPS 180-4 constants
 # ============================================================================
 
+K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa831c66d,  # kept below by canonical list validation
+    0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]
+
+# Correct canonical FIPS table.
 K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -79,8 +121,14 @@ K = [
 ]
 
 IV = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667,
+    0xbb67ae85,
+    0x3c6ef372,
+    0xa54ff53a,
+    0x510e527f,
+    0x9b05688c,
+    0x1f83d9ab,
+    0x5be0cd19,
 ]
 
 MASK32 = 0xFFFFFFFF
@@ -127,6 +175,7 @@ def sha256_reduced_compress_py(
     words: List[int],
     rounds: int,
 ) -> List[int]:
+
     if not 1 <= rounds <= 64:
         raise ValueError("rounds must be in [1, 64]")
 
@@ -186,17 +235,24 @@ def sha256_reduced_compress_py(
     ]
 
 
-def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
-    """
-    Directly compare the standard and sliding-window recurrences.
+def check_sw_recurrence(
+    rounds: int,
+    trials: int = 250,
+) -> None:
 
-    This is deliberately independent of the SMT generator.
-    """
     rng = random.Random(0x534857 ^ rounds)
 
     for trial in range(trials):
-        state = [rng.getrandbits(32) for _ in range(8)]
-        words = [rng.getrandbits(32) for _ in range(rounds)]
+
+        state = [
+            rng.getrandbits(32)
+            for _ in range(8)
+        ]
+
+        words = [
+            rng.getrandbits(32)
+            for _ in range(rounds)
+        ]
 
         a, b, c, d, e, f, g, h = state
 
@@ -204,6 +260,7 @@ def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
         b_mt = [h, g, f, e]
 
         for i in range(rounds):
+
             t1 = (
                 h
                 + big_sigma1(e)
@@ -232,7 +289,9 @@ def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
                 + words[i]
             ) & MASK32
 
-            sw_b_next = (a_mt[i] + sw_t1) & MASK32
+            sw_b_next = (
+                a_mt[i] + sw_t1
+            ) & MASK32
 
             sw_t2 = (
                 big_sigma0(a_mt[i + 3])
@@ -250,14 +309,14 @@ def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
 
             if sw_b_next != expected_e:
                 raise AssertionError(
-                    f"SW E recurrence mismatch at trial={trial}, "
-                    f"round={i}"
+                    f"SW E recurrence mismatch at "
+                    f"trial={trial}, round={i}"
                 )
 
             if sw_a_next != expected_a:
                 raise AssertionError(
-                    f"SW A recurrence mismatch at trial={trial}, "
-                    f"round={i}"
+                    f"SW A recurrence mismatch at "
+                    f"trial={trial}, round={i}"
                 )
 
             a_mt.append(sw_a_next)
@@ -281,10 +340,11 @@ def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
 
 
 # ============================================================================
-# SMT-LIB2
+# SMT-LIB
 # ============================================================================
 
-PREAMBLE = r"""(set-logic QF_BV)
+PREAMBLE = r"""
+(set-logic QF_BV)
 (set-option :produce-models true)
 
 (define-fun rotr32
@@ -365,17 +425,23 @@ def bv32(value: int) -> str:
     return f"#x{value & MASK32:08x}"
 
 
-def emit_msg_schedule(rounds: int, prefix: str) -> str:
+def emit_msg_schedule(
+    rounds: int,
+    prefix: str,
+) -> str:
+
     lines: List[str] = []
 
     for i in range(16):
         lines.append(
-            f"(declare-const {prefix}w_{i} (_ BitVec 32))"
+            f"(declare-const {prefix}w_{i} "
+            f"(_ BitVec 32))"
         )
 
     for i in range(16, rounds):
         lines.append(
-            f"(define-fun {prefix}w_{i} () (_ BitVec 32) "
+            f"(define-fun {prefix}w_{i} () "
+            f"(_ BitVec 32) "
             f"(bvadd "
             f"(bvadd {prefix}w_{i-16} "
             f"(s0 {prefix}w_{i-15})) "
@@ -386,15 +452,21 @@ def emit_msg_schedule(rounds: int, prefix: str) -> str:
     return "\n".join(lines)
 
 
+# ============================================================================
+# Collision benchmark builders
+# ============================================================================
+
 def emit_diff_constraints(
     diff_pattern: Dict[int, int],
 ) -> str:
+
     if diff_pattern:
         return "\n".join(
             f"(assert (= "
             f"(bvxor m1_w_{idx} m2_w_{idx}) "
             f"{bv32(diff)}))"
-            for idx, diff in sorted(diff_pattern.items())
+            for idx, diff
+            in sorted(diff_pattern.items())
         )
 
     conditions = [
@@ -402,10 +474,13 @@ def emit_diff_constraints(
         for i in range(16)
     ]
 
-    return f"(assert (or {' '.join(conditions)}))"
+    return (
+        f"(assert (or {' '.join(conditions)}))"
+    )
 
 
 def emit_witness_request() -> str:
+
     names = [
         f"m{b}_w_{i}"
         for b in (1, 2)
@@ -421,14 +496,11 @@ def emit_witness_request() -> str:
     )
 
 
-# ============================================================================
-# SMT model builders
-# ============================================================================
-
 def build_std_explicit(
     rounds: int,
     diff_pattern: Dict[int, int],
 ) -> str:
+
     lines = [
         PREAMBLE,
         emit_msg_schedule(rounds, "m1_"),
@@ -437,73 +509,92 @@ def build_std_explicit(
     ]
 
     for prefix in ("m1_", "m2_"):
+
         for i in range(rounds + 1):
             for name in "abcdefgh":
                 lines.append(
-                    f"(declare-const {prefix}{name}_{i} "
+                    f"(declare-const "
+                    f"{prefix}{name}_{i} "
                     f"(_ BitVec 32))"
                 )
 
         for idx, name in enumerate("abcdefgh"):
             lines.append(
-                f"(assert (= {prefix}{name}_0 "
+                f"(assert (= "
+                f"{prefix}{name}_0 "
                 f"{bv32(IV[idx])}))"
             )
 
         for i in range(rounds):
+
             k = bv32(K[i])
 
             lines.append(
-                f"(define-fun {prefix}t1_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t1_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd {prefix}h_{i} "
                 f"(bvadd (S1 {prefix}e_{i}) "
                 f"(bvadd "
                 f"(ch_std {prefix}e_{i} "
-                f"{prefix}f_{i} {prefix}g_{i}) "
-                f"(bvadd {k} {prefix}w_{i})))))"
+                f"{prefix}f_{i} "
+                f"{prefix}g_{i}) "
+                f"(bvadd {k} "
+                f"{prefix}w_{i})))))"
             )
 
             lines.append(
-                f"(define-fun {prefix}t2_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t2_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd "
                 f"(S0 {prefix}a_{i}) "
                 f"(Maj {prefix}a_{i} "
-                f"{prefix}b_{i} {prefix}c_{i})))"
+                f"{prefix}b_{i} "
+                f"{prefix}c_{i})))"
             )
 
             lines.extend([
-                f"(assert (= {prefix}a_{i+1} "
+                f"(assert (= "
+                f"{prefix}a_{i+1} "
                 f"(bvadd {prefix}t1_{i} "
                 f"{prefix}t2_{i})))",
 
-                f"(assert (= {prefix}b_{i+1} "
+                f"(assert (= "
+                f"{prefix}b_{i+1} "
                 f"{prefix}a_{i}))",
 
-                f"(assert (= {prefix}c_{i+1} "
+                f"(assert (= "
+                f"{prefix}c_{i+1} "
                 f"{prefix}b_{i}))",
 
-                f"(assert (= {prefix}d_{i+1} "
+                f"(assert (= "
+                f"{prefix}d_{i+1} "
                 f"{prefix}c_{i}))",
 
-                f"(assert (= {prefix}e_{i+1} "
+                f"(assert (= "
+                f"{prefix}e_{i+1} "
                 f"(bvadd {prefix}d_{i} "
                 f"{prefix}t1_{i})))",
 
-                f"(assert (= {prefix}f_{i+1} "
+                f"(assert (= "
+                f"{prefix}f_{i+1} "
                 f"{prefix}e_{i}))",
 
-                f"(assert (= {prefix}g_{i+1} "
+                f"(assert (= "
+                f"{prefix}g_{i+1} "
                 f"{prefix}f_{i}))",
 
-                f"(assert (= {prefix}h_{i+1} "
+                f"(assert (= "
+                f"{prefix}h_{i+1} "
                 f"{prefix}g_{i}))",
             ])
 
     for name in "abcdefgh":
         lines.append(
             f"(assert (= "
-            f"(bvadd m1_{name}_0 m1_{name}_{rounds}) "
-            f"(bvadd m2_{name}_0 m2_{name}_{rounds})))"
+            f"(bvadd m1_{name}_0 "
+            f"m1_{name}_{rounds}) "
+            f"(bvadd m2_{name}_0 "
+            f"m2_{name}_{rounds})))"
         )
 
     lines.append(emit_witness_request())
@@ -515,6 +606,7 @@ def build_sw_explicit(
     rounds: int,
     diff_pattern: Dict[int, int],
 ) -> str:
+
     lines = [
         PREAMBLE,
         emit_msg_schedule(rounds, "m1_"),
@@ -523,58 +615,86 @@ def build_sw_explicit(
     ]
 
     for prefix in ("m1_", "m2_"):
+
         for i in range(rounds + 4):
             lines.extend([
-                f"(declare-const {prefix}a_mt_{i} "
+                f"(declare-const "
+                f"{prefix}a_mt_{i} "
                 f"(_ BitVec 32))",
-                f"(declare-const {prefix}b_mt_{i} "
+
+                f"(declare-const "
+                f"{prefix}b_mt_{i} "
                 f"(_ BitVec 32))",
             ])
 
         lines.extend([
-            f"(assert (= {prefix}a_mt_0 {bv32(IV[3])}))",
-            f"(assert (= {prefix}a_mt_1 {bv32(IV[2])}))",
-            f"(assert (= {prefix}a_mt_2 {bv32(IV[1])}))",
-            f"(assert (= {prefix}a_mt_3 {bv32(IV[0])}))",
+            f"(assert (= "
+            f"{prefix}a_mt_0 {bv32(IV[3])}))",
 
-            f"(assert (= {prefix}b_mt_0 {bv32(IV[7])}))",
-            f"(assert (= {prefix}b_mt_1 {bv32(IV[6])}))",
-            f"(assert (= {prefix}b_mt_2 {bv32(IV[5])}))",
-            f"(assert (= {prefix}b_mt_3 {bv32(IV[4])}))",
+            f"(assert (= "
+            f"{prefix}a_mt_1 {bv32(IV[2])}))",
+
+            f"(assert (= "
+            f"{prefix}a_mt_2 {bv32(IV[1])}))",
+
+            f"(assert (= "
+            f"{prefix}a_mt_3 {bv32(IV[0])}))",
+
+            f"(assert (= "
+            f"{prefix}b_mt_0 {bv32(IV[7])}))",
+
+            f"(assert (= "
+            f"{prefix}b_mt_1 {bv32(IV[6])}))",
+
+            f"(assert (= "
+            f"{prefix}b_mt_2 {bv32(IV[5])}))",
+
+            f"(assert (= "
+            f"{prefix}b_mt_3 {bv32(IV[4])}))",
         ])
 
         for i in range(rounds):
+
             k = bv32(K[i])
 
             lines.append(
-                f"(define-fun {prefix}t1_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t1_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd {prefix}b_mt_{i} "
                 f"(bvadd "
                 f"(S1 {prefix}b_mt_{i+3}) "
                 f"(bvadd "
-                f"(ch_sw {prefix}b_mt_{i+3} "
+                f"(ch_sw "
+                f"{prefix}b_mt_{i+3} "
                 f"{prefix}b_mt_{i+2} "
                 f"{prefix}b_mt_{i+1}) "
-                f"(bvadd {k} {prefix}w_{i})))))"
+                f"(bvadd {k} "
+                f"{prefix}w_{i})))))"
             )
 
             lines.append(
-                f"(define-fun {prefix}t2_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t2_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd "
                 f"(S0 {prefix}a_mt_{i+3}) "
-                f"(Maj {prefix}a_mt_{i+3} "
+                f"(Maj "
+                f"{prefix}a_mt_{i+3} "
                 f"{prefix}a_mt_{i+2} "
                 f"{prefix}a_mt_{i+1})))"
             )
 
             lines.extend([
-                f"(assert (= {prefix}b_mt_{i+4} "
-                f"(bvadd {prefix}a_mt_{i} "
+                f"(assert (= "
+                f"{prefix}b_mt_{i+4} "
+                f"(bvadd "
+                f"{prefix}a_mt_{i} "
                 f"{prefix}t1_{i})))",
 
-                f"(assert (= {prefix}a_mt_{i+4} "
+                f"(assert (= "
+                f"{prefix}a_mt_{i+4} "
                 f"(bvadd "
-                f"(bvsub {prefix}b_mt_{i+4} "
+                f"(bvsub "
+                f"{prefix}b_mt_{i+4} "
                 f"{prefix}a_mt_{i}) "
                 f"{prefix}t2_{i})))",
             ])
@@ -608,6 +728,7 @@ def build_std_inline(
     rounds: int,
     diff_pattern: Dict[int, int],
 ) -> str:
+
     lines = [
         PREAMBLE,
         emit_msg_schedule(rounds, "m1_"),
@@ -616,68 +737,97 @@ def build_std_inline(
     ]
 
     for prefix in ("m1_", "m2_"):
+
         for idx, name in enumerate("abcdefgh"):
             lines.append(
-                f"(define-fun {prefix}{name}_0 () "
-                f"(_ BitVec 32) {bv32(IV[idx])})"
+                f"(define-fun "
+                f"{prefix}{name}_0 () "
+                f"(_ BitVec 32) "
+                f"{bv32(IV[idx])})"
             )
 
         for i in range(rounds):
+
             k = bv32(K[i])
 
             lines.append(
-                f"(define-fun {prefix}t1_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t1_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd {prefix}h_{i} "
                 f"(bvadd (S1 {prefix}e_{i}) "
                 f"(bvadd "
-                f"(ch_std {prefix}e_{i} "
-                f"{prefix}f_{i} {prefix}g_{i}) "
-                f"(bvadd {k} {prefix}w_{i})))))"
+                f"(ch_std "
+                f"{prefix}e_{i} "
+                f"{prefix}f_{i} "
+                f"{prefix}g_{i}) "
+                f"(bvadd {k} "
+                f"{prefix}w_{i})))))"
             )
 
             lines.append(
-                f"(define-fun {prefix}t2_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t2_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd "
                 f"(S0 {prefix}a_{i}) "
-                f"(Maj {prefix}a_{i} "
-                f"{prefix}b_{i} {prefix}c_{i})))"
+                f"(Maj "
+                f"{prefix}a_{i} "
+                f"{prefix}b_{i} "
+                f"{prefix}c_{i})))"
             )
 
             lines.extend([
-                f"(define-fun {prefix}a_{i+1} () "
+                f"(define-fun "
+                f"{prefix}a_{i+1} () "
                 f"(_ BitVec 32) "
-                f"(bvadd {prefix}t1_{i} "
+                f"(bvadd "
+                f"{prefix}t1_{i} "
                 f"{prefix}t2_{i}))",
 
-                f"(define-fun {prefix}b_{i+1} () "
-                f"(_ BitVec 32) {prefix}a_{i})",
-
-                f"(define-fun {prefix}c_{i+1} () "
-                f"(_ BitVec 32) {prefix}b_{i})",
-
-                f"(define-fun {prefix}d_{i+1} () "
-                f"(_ BitVec 32) {prefix}c_{i})",
-
-                f"(define-fun {prefix}e_{i+1} () "
+                f"(define-fun "
+                f"{prefix}b_{i+1} () "
                 f"(_ BitVec 32) "
-                f"(bvadd {prefix}d_{i} "
+                f"{prefix}a_{i})",
+
+                f"(define-fun "
+                f"{prefix}c_{i+1} () "
+                f"(_ BitVec 32) "
+                f"{prefix}b_{i})",
+
+                f"(define-fun "
+                f"{prefix}d_{i+1} () "
+                f"(_ BitVec 32) "
+                f"{prefix}c_{i})",
+
+                f"(define-fun "
+                f"{prefix}e_{i+1} () "
+                f"(_ BitVec 32) "
+                f"(bvadd "
+                f"{prefix}d_{i} "
                 f"{prefix}t1_{i}))",
 
-                f"(define-fun {prefix}f_{i+1} () "
-                f"(_ BitVec 32) {prefix}e_{i})",
+                f"(define-fun "
+                f"{prefix}f_{i+1} () "
+                f"(_ BitVec 32) "
+                f"{prefix}e_{i})",
 
-                f"(define-fun {prefix}g_{i+1} () "
-                f"(_ BitVec 32) {prefix}f_{i})",
+                f"(define-fun "
+                f"{prefix}g_{i+1} () "
+                f"(_ BitVec 32) "
+                f"{prefix}f_{i})",
 
-                f"(define-fun {prefix}h_{i+1} () "
-                f"(_ BitVec 32) {prefix}g_{i})",
+                f"(define-fun "
+                f"{prefix}h_{i+1} () "
+                f"(_ BitVec 32) "
+                f"{prefix}g_{i})",
             ])
 
     for name in "abcdefgh":
         lines.append(
             f"(assert (= "
-            f"(bvadd m1_{name}_0 m1_{name}_{rounds}) "
-            f"(bvadd m2_{name}_0 m2_{name}_{rounds})))"
+            f"(bvadd m1_{name}_0 "
+            f"m1_{name}_{rounds}) "
+            f"(bvadd m2_{name}_0 "
+            f"m2_{name}_{rounds})))"
         )
 
     lines.append(emit_witness_request())
@@ -689,6 +839,7 @@ def build_sw_inline(
     rounds: int,
     diff_pattern: Dict[int, int],
 ) -> str:
+
     lines = [
         PREAMBLE,
         emit_msg_schedule(rounds, "m1_"),
@@ -697,45 +848,57 @@ def build_sw_inline(
     ]
 
     for prefix in ("m1_", "m2_"):
+
         lines.extend([
             f"(define-fun {prefix}a_mt_0 () "
             f"(_ BitVec 32) {bv32(IV[3])})",
+
             f"(define-fun {prefix}a_mt_1 () "
             f"(_ BitVec 32) {bv32(IV[2])})",
+
             f"(define-fun {prefix}a_mt_2 () "
             f"(_ BitVec 32) {bv32(IV[1])})",
+
             f"(define-fun {prefix}a_mt_3 () "
             f"(_ BitVec 32) {bv32(IV[0])})",
 
             f"(define-fun {prefix}b_mt_0 () "
             f"(_ BitVec 32) {bv32(IV[7])})",
+
             f"(define-fun {prefix}b_mt_1 () "
             f"(_ BitVec 32) {bv32(IV[6])})",
+
             f"(define-fun {prefix}b_mt_2 () "
             f"(_ BitVec 32) {bv32(IV[5])})",
+
             f"(define-fun {prefix}b_mt_3 () "
             f"(_ BitVec 32) {bv32(IV[4])})",
         ])
 
         for i in range(rounds):
+
             k = bv32(K[i])
 
             lines.append(
-                f"(define-fun {prefix}t1_{i} () (_ BitVec 32) "
+                f"(define-fun {prefix}t1_{i} () "
+                f"(_ BitVec 32) "
                 f"(bvadd {prefix}b_mt_{i} "
                 f"(bvadd "
                 f"(S1 {prefix}b_mt_{i+3}) "
                 f"(bvadd "
-                f"(ch_sw {prefix}b_mt_{i+3} "
+                f"(ch_sw "
+                f"{prefix}b_mt_{i+3} "
                 f"{prefix}b_mt_{i+2} "
                 f"{prefix}b_mt_{i+1}) "
-                f"(bvadd {k} {prefix}w_{i})))))"
+                f"(bvadd {k} "
+                f"{prefix}w_{i})))))"
             )
 
             lines.append(
                 f"(define-fun {prefix}b_mt_{i+4} () "
                 f"(_ BitVec 32) "
-                f"(bvadd {prefix}a_mt_{i} "
+                f"(bvadd "
+                f"{prefix}a_mt_{i} "
                 f"{prefix}t1_{i}))"
             )
 
@@ -744,7 +907,8 @@ def build_sw_inline(
                 f"(_ BitVec 32) "
                 f"(bvadd "
                 f"(S0 {prefix}a_mt_{i+3}) "
-                f"(Maj {prefix}a_mt_{i+3} "
+                f"(Maj "
+                f"{prefix}a_mt_{i+3} "
                 f"{prefix}a_mt_{i+2} "
                 f"{prefix}a_mt_{i+1})))"
             )
@@ -753,7 +917,8 @@ def build_sw_inline(
                 f"(define-fun {prefix}a_mt_{i+4} () "
                 f"(_ BitVec 32) "
                 f"(bvadd "
-                f"(bvsub {prefix}b_mt_{i+4} "
+                f"(bvsub "
+                f"{prefix}b_mt_{i+4} "
                 f"{prefix}a_mt_{i}) "
                 f"{prefix}t2_{i}))"
             )
@@ -783,7 +948,7 @@ def build_sw_inline(
     return "\n".join(lines)
 
 
-BUILDERS = {
+COLLISION_BUILDERS = {
     "Std-Explicit": build_std_explicit,
     "SW-Explicit": build_sw_explicit,
     "Std-Inline": build_std_inline,
@@ -792,11 +957,375 @@ BUILDERS = {
 
 
 # ============================================================================
+# Equivalence builders
+# ============================================================================
+
+def emit_symbolic_iv(prefix: str = "iv_") -> str:
+
+    return "\n".join(
+        f"(declare-const {prefix}{name} "
+        f"(_ BitVec 32))"
+        for name in "abcdefgh"
+    )
+
+
+def emit_std_equiv_explicit(
+    rounds: int,
+) -> str:
+
+    lines = [
+        PREAMBLE,
+        emit_msg_schedule(rounds, "sym_"),
+        emit_symbolic_iv(),
+    ]
+
+    for i in range(rounds + 1):
+        for name in "abcdefgh":
+            lines.append(
+                f"(declare-const std_{name}_{i} "
+                f"(_ BitVec 32))"
+            )
+
+    for name in "abcdefgh":
+        lines.append(
+            f"(assert (= std_{name}_0 iv_{name}))"
+        )
+
+    for i in range(rounds):
+
+        k = bv32(K[i])
+        w = f"sym_w_{i}"
+
+        lines.append(
+            f"(define-fun std_t1_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd std_h_{i} "
+            f"(bvadd "
+            f"(S1 std_e_{i}) "
+            f"(bvadd "
+            f"(ch_std "
+            f"std_e_{i} "
+            f"std_f_{i} "
+            f"std_g_{i}) "
+            f"(bvadd {k} {w})))))"
+        )
+
+        lines.append(
+            f"(define-fun std_t2_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd "
+            f"(S0 std_a_{i}) "
+            f"(Maj "
+            f"std_a_{i} "
+            f"std_b_{i} "
+            f"std_c_{i})))"
+        )
+
+        lines.extend([
+            f"(assert (= std_a_{i+1} "
+            f"(bvadd std_t1_{i} "
+            f"std_t2_{i})))",
+
+            f"(assert (= std_b_{i+1} "
+            f"std_a_{i}))",
+
+            f"(assert (= std_c_{i+1} "
+            f"std_b_{i}))",
+
+            f"(assert (= std_d_{i+1} "
+            f"std_c_{i}))",
+
+            f"(assert (= std_e_{i+1} "
+            f"(bvadd std_d_{i} "
+            f"std_t1_{i})))",
+
+            f"(assert (= std_f_{i+1} "
+            f"std_e_{i}))",
+
+            f"(assert (= std_g_{i+1} "
+            f"std_f_{i}))",
+
+            f"(assert (= std_h_{i+1} "
+            f"std_g_{i}))",
+        ])
+
+    return "\n".join(lines)
+
+
+def emit_sw_equiv_explicit(
+    rounds: int,
+) -> str:
+
+    lines = []
+
+    for i in range(rounds + 4):
+        lines.extend([
+            f"(declare-const sw_a_{i} "
+            f"(_ BitVec 32))",
+
+            f"(declare-const sw_b_{i} "
+            f"(_ BitVec 32))",
+        ])
+
+    lines.extend([
+        "(assert (= sw_a_0 iv_d))",
+        "(assert (= sw_a_1 iv_c))",
+        "(assert (= sw_a_2 iv_b))",
+        "(assert (= sw_a_3 iv_a))",
+
+        "(assert (= sw_b_0 iv_h))",
+        "(assert (= sw_b_1 iv_g))",
+        "(assert (= sw_b_2 iv_f))",
+        "(assert (= sw_b_3 iv_e))",
+    ])
+
+    for i in range(rounds):
+
+        k = bv32(K[i])
+        w = f"sym_w_{i}"
+
+        lines.append(
+            f"(define-fun sw_t1_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd sw_b_{i} "
+            f"(bvadd "
+            f"(S1 sw_b_{i+3}) "
+            f"(bvadd "
+            f"(ch_sw "
+            f"sw_b_{i+3} "
+            f"sw_b_{i+2} "
+            f"sw_b_{i+1}) "
+            f"(bvadd {k} {w})))))"
+        )
+
+        lines.append(
+            f"(define-fun sw_t2_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd "
+            f"(S0 sw_a_{i+3}) "
+            f"(Maj "
+            f"sw_a_{i+3} "
+            f"sw_a_{i+2} "
+            f"sw_a_{i+1})))"
+        )
+
+        lines.extend([
+            f"(assert (= sw_b_{i+4} "
+            f"(bvadd "
+            f"sw_a_{i} "
+            f"sw_t1_{i})))",
+
+            f"(assert (= sw_a_{i+4} "
+            f"(bvadd "
+            f"(bvsub "
+            f"sw_b_{i+4} "
+            f"sw_a_{i}) "
+            f"sw_t2_{i})))",
+        ])
+
+    return "\n".join(lines)
+
+
+def build_equiv_explicit(
+    rounds: int,
+) -> str:
+
+    lines = [
+        emit_std_equiv_explicit(rounds),
+        emit_sw_equiv_explicit(rounds),
+    ]
+
+    lines.append(
+        f"""
+(assert (or
+  (distinct std_a_{rounds} sw_a_{rounds+3})
+  (distinct std_b_{rounds} sw_a_{rounds+2})
+  (distinct std_c_{rounds} sw_a_{rounds+1})
+  (distinct std_d_{rounds} sw_a_{rounds})
+  (distinct std_e_{rounds} sw_b_{rounds+3})
+  (distinct std_f_{rounds} sw_b_{rounds+2})
+  (distinct std_g_{rounds} sw_b_{rounds+1})
+  (distinct std_h_{rounds} sw_b_{rounds})))
+
+(check-sat)
+(exit)
+"""
+    )
+
+    return PREAMBLE + "\n" + "\n".join(lines)
+
+
+def build_equiv_inline(
+    rounds: int,
+) -> str:
+
+    lines = [
+        PREAMBLE,
+        emit_msg_schedule(rounds, "sym_"),
+        emit_symbolic_iv(),
+    ]
+
+    for name in "abcdefgh":
+        lines.append(
+            f"(define-fun std_{name}_0 () "
+            f"(_ BitVec 32) iv_{name})"
+        )
+
+    for i in range(rounds):
+
+        k = bv32(K[i])
+        w = f"sym_w_{i}"
+
+        lines.append(
+            f"(define-fun std_t1_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd std_h_{i} "
+            f"(bvadd "
+            f"(S1 std_e_{i}) "
+            f"(bvadd "
+            f"(ch_std "
+            f"std_e_{i} "
+            f"std_f_{i} "
+            f"std_g_{i}) "
+            f"(bvadd {k} {w})))))"
+        )
+
+        lines.append(
+            f"(define-fun std_t2_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd "
+            f"(S0 std_a_{i}) "
+            f"(Maj "
+            f"std_a_{i} "
+            f"std_b_{i} "
+            f"std_c_{i})))"
+        )
+
+        lines.extend([
+            f"(define-fun std_a_{i+1} () "
+            f"(_ BitVec 32) "
+            f"(bvadd std_t1_{i} "
+            f"std_t2_{i}))",
+
+            f"(define-fun std_b_{i+1} () "
+            f"(_ BitVec 32) std_a_{i})",
+
+            f"(define-fun std_c_{i+1} () "
+            f"(_ BitVec 32) std_b_{i})",
+
+            f"(define-fun std_d_{i+1} () "
+            f"(_ BitVec 32) std_c_{i})",
+
+            f"(define-fun std_e_{i+1} () "
+            f"(_ BitVec 32) "
+            f"(bvadd std_d_{i} "
+            f"std_t1_{i}))",
+
+            f"(define-fun std_f_{i+1} () "
+            f"(_ BitVec 32) std_e_{i})",
+
+            f"(define-fun std_g_{i+1} () "
+            f"(_ BitVec 32) std_f_{i})",
+
+            f"(define-fun std_h_{i+1} () "
+            f"(_ BitVec 32) std_g_{i})",
+        ])
+
+    lines.extend([
+        "(define-fun sw_a_0 () (_ BitVec 32) iv_d)",
+        "(define-fun sw_a_1 () (_ BitVec 32) iv_c)",
+        "(define-fun sw_a_2 () (_ BitVec 32) iv_b)",
+        "(define-fun sw_a_3 () (_ BitVec 32) iv_a)",
+
+        "(define-fun sw_b_0 () (_ BitVec 32) iv_h)",
+        "(define-fun sw_b_1 () (_ BitVec 32) iv_g)",
+        "(define-fun sw_b_2 () (_ BitVec 32) iv_f)",
+        "(define-fun sw_b_3 () (_ BitVec 32) iv_e)",
+    ])
+
+    for i in range(rounds):
+
+        k = bv32(K[i])
+        w = f"sym_w_{i}"
+
+        lines.append(
+            f"(define-fun sw_t1_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd sw_b_{i} "
+            f"(bvadd "
+            f"(S1 sw_b_{i+3}) "
+            f"(bvadd "
+            f"(ch_sw "
+            f"sw_b_{i+3} "
+            f"sw_b_{i+2} "
+            f"sw_b_{i+1}) "
+            f"(bvadd {k} {w})))))"
+        )
+
+        lines.append(
+            f"(define-fun sw_b_{i+4} () "
+            f"(_ BitVec 32) "
+            f"(bvadd sw_a_{i} "
+            f"sw_t1_{i}))"
+        )
+
+        lines.append(
+            f"(define-fun sw_t2_{i} () "
+            f"(_ BitVec 32) "
+            f"(bvadd "
+            f"(S0 sw_a_{i+3}) "
+            f"(Maj "
+            f"sw_a_{i+3} "
+            f"sw_a_{i+2} "
+            f"sw_a_{i+1})))"
+        )
+
+        lines.append(
+            f"(define-fun sw_a_{i+4} () "
+            f"(_ BitVec 32) "
+            f"(bvadd "
+            f"(bvsub sw_b_{i+4} "
+            f"sw_a_{i}) "
+            f"sw_t2_{i}))"
+        )
+
+    lines.append(
+        f"""
+(assert (or
+  (distinct std_a_{rounds} sw_a_{rounds+3})
+  (distinct std_b_{rounds} sw_a_{rounds+2})
+  (distinct std_c_{rounds} sw_a_{rounds+1})
+  (distinct std_d_{rounds} sw_a_{rounds})
+  (distinct std_e_{rounds} sw_b_{rounds+3})
+  (distinct std_f_{rounds} sw_b_{rounds+2})
+  (distinct std_g_{rounds} sw_b_{rounds+1})
+  (distinct std_h_{rounds} sw_b_{rounds})))
+
+(check-sat)
+(exit)
+"""
+    )
+
+    return "\n".join(lines)
+
+
+EQUIV_BUILDERS = {
+    "Std-Explicit": build_equiv_explicit,
+    "Std-Inline": build_equiv_inline,
+}
+
+
+# ============================================================================
 # Solver parsing
 # ============================================================================
 
-def parse_status(stdout: str, stderr: str = "") -> str:
+def parse_status(
+    stdout: str,
+    stderr: str = "",
+) -> str:
+
     for line in stdout.splitlines():
+
         token = line.strip().lower()
 
         if token == "sat":
@@ -808,7 +1337,11 @@ def parse_status(stdout: str, stderr: str = "") -> str:
         if token == "unknown":
             return "unknown"
 
-    combined = (stdout + "\n" + stderr).lower()
+    combined = (
+        stdout
+        + "\n"
+        + stderr
+    ).lower()
 
     if "timeout" in combined:
         return "timeout"
@@ -822,25 +1355,32 @@ def parse_status(stdout: str, stderr: str = "") -> str:
 def parse_witness(
     stdout: str,
 ) -> Optional[Dict[str, int]]:
+
     values: Dict[str, int] = {}
 
     pattern = re.compile(
         r"\(\s*"
-        r"(m[12]_w_\d+)"
-        r"\s+"
+        r"(m[12]_w_\d+)\s+"
         r"(#x[0-9a-fA-F]+|"
         r"\(_\s+bv([0-9]+)\s+32\))"
         r"\s*\)"
     )
 
     for match in pattern.finditer(stdout):
+
         name = match.group(1)
         token = match.group(2)
 
         if token.startswith("#x"):
-            values[name] = int(token[2:], 16)
+            values[name] = int(
+                token[2:],
+                16,
+            )
         else:
-            values[name] = int(match.group(3), 10)
+            values[name] = int(
+                match.group(3),
+                10,
+            )
 
     expected = {
         f"m{branch}_w_{i}"
@@ -860,8 +1400,10 @@ def parse_witness(
 
 @dataclass
 class TrialResult:
+
     solver: str
     version: str
+    mode: str
     rounds: int
     representation: str
     trial: int
@@ -876,7 +1418,7 @@ class TrialResult:
 # Solver execution
 # ============================================================================
 
-def run_solver_instance(
+def run_collision_instance(
     model_name: str,
     rounds: int,
     trial: int,
@@ -886,7 +1428,11 @@ def run_solver_instance(
     timeout: int,
     keep_smt: bool,
 ) -> TrialResult:
-    code = BUILDERS[model_name](rounds, diff)
+
+    code = COLLISION_BUILDERS[model_name](
+        rounds,
+        diff,
+    )
 
     temp_handle = tempfile.NamedTemporaryFile(
         mode="w",
@@ -903,12 +1449,14 @@ def run_solver_instance(
     filename = Path(temp_handle.name)
 
     try:
+
         temp_handle.write(code)
         temp_handle.close()
 
         started = time.perf_counter()
 
         try:
+
             proc = subprocess.run(
                 [solver_cmd, str(filename)],
                 capture_output=True,
@@ -916,24 +1464,36 @@ def run_solver_instance(
                 timeout=timeout,
             )
 
-            runtime = time.perf_counter() - started
+            runtime = (
+                time.perf_counter()
+                - started
+            )
+
             status = parse_status(
                 proc.stdout,
                 proc.stderr,
             )
+
             timed_out = False
 
         except subprocess.TimeoutExpired:
+
             runtime = float(timeout)
             status = "timeout"
             timed_out = True
             proc = None
 
         except OSError as exc:
-            runtime = time.perf_counter() - started
+
+            runtime = (
+                time.perf_counter()
+                - started
+            )
+
             status = "error"
             timed_out = False
             proc = None
+
             print(
                 f"[ERROR] Could not execute solver "
                 f"{solver_cmd!r}: {exc}",
@@ -943,14 +1503,23 @@ def run_solver_instance(
         verified: Optional[bool] = None
 
         if status == "sat":
+
             if proc is None:
+
                 verified = False
+
             else:
-                witness = parse_witness(proc.stdout)
+
+                witness = parse_witness(
+                    proc.stdout
+                )
 
                 if witness is None:
+
                     verified = False
+
                 else:
+
                     m1_words = [
                         witness[f"m1_w_{i}"]
                         for i in range(16)
@@ -961,16 +1530,20 @@ def run_solver_instance(
                         for i in range(16)
                     ]
 
-                    h1 = sha256_reduced_compress_py(
-                        IV,
-                        m1_words,
-                        rounds,
+                    h1 = (
+                        sha256_reduced_compress_py(
+                            IV,
+                            m1_words,
+                            rounds,
+                        )
                     )
 
-                    h2 = sha256_reduced_compress_py(
-                        IV,
-                        m2_words,
-                        rounds,
+                    h2 = (
+                        sha256_reduced_compress_py(
+                            IV,
+                            m2_words,
+                            rounds,
+                        )
                     )
 
                     verified = (
@@ -981,6 +1554,7 @@ def run_solver_instance(
         return TrialResult(
             solver=solver_cmd,
             version=solver_ver,
+            mode="collision",
             rounds=rounds,
             representation=model_name,
             trial=trial,
@@ -992,7 +1566,128 @@ def run_solver_instance(
         )
 
     finally:
+
         if not keep_smt:
+
+            try:
+                filename.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def run_equiv_instance(
+    model_name: str,
+    rounds: int,
+    trial: int,
+    solver_cmd: str,
+    solver_ver: str,
+    timeout: int,
+    keep_smt: bool,
+) -> TrialResult:
+
+    code = EQUIV_BUILDERS[model_name](rounds)
+
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".smt2",
+        prefix=(
+            f"sha256sw_equiv_"
+            f"{model_name.replace('-', '_')}_"
+            f"r{rounds}_t{trial}_"
+        ),
+        delete=False,
+        encoding="utf-8",
+    )
+
+    filename = Path(temp_handle.name)
+
+    try:
+
+        temp_handle.write(code)
+        temp_handle.close()
+
+        started = time.perf_counter()
+
+        try:
+
+            proc = subprocess.run(
+                [solver_cmd, str(filename)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            runtime = (
+                time.perf_counter()
+                - started
+            )
+
+            status = parse_status(
+                proc.stdout,
+                proc.stderr,
+            )
+
+            timed_out = False
+
+        except subprocess.TimeoutExpired:
+
+            runtime = float(timeout)
+            status = "timeout"
+            timed_out = True
+            proc = None
+
+        except OSError as exc:
+
+            runtime = (
+                time.perf_counter()
+                - started
+            )
+
+            status = "error"
+            timed_out = False
+            proc = None
+
+            print(
+                f"[ERROR] Could not execute solver "
+                f"{solver_cmd!r}: {exc}",
+                file=sys.stderr,
+            )
+
+        # In equivalence mode:
+        #
+        #   UNSAT = proof of equivalence
+        #   SAT   = counterexample
+        #
+        # There is no witness verification requirement here because
+        # the benchmark's assertion itself is the semantic property.
+
+        verified: Optional[bool]
+
+        if status == "unsat":
+            verified = True
+        elif status == "sat":
+            verified = False
+        else:
+            verified = None
+
+        return TrialResult(
+            solver=solver_cmd,
+            version=solver_ver,
+            mode="equiv",
+            rounds=rounds,
+            representation=model_name,
+            trial=trial,
+            status=status,
+            runtime_seconds=runtime,
+            timeout=timed_out,
+            verified=verified,
+            message_diff="",
+        )
+
+    finally:
+
+        if not keep_smt:
+
             try:
                 filename.unlink()
             except FileNotFoundError:
@@ -1000,33 +1695,19 @@ def run_solver_instance(
 
 
 # ============================================================================
-# Formal symbolic equivalence gate
+# Gate 0
 # ============================================================================
 
 def verify_formal_equivalence_gate(
     solver_cmd: str,
-    rounds_to_verify: List[int],
     timeout: int,
 ) -> None:
-    """
-    Fast symbolic sanity gate.
-
-    IMPORTANT:
-        This gate intentionally proves only the one-round recurrence.
-
-    The full multi-round symbolic circuit is not used as a CI gate because
-    the QF_BV problem grows rapidly with round depth and can become solver-
-    dependent. Multi-round correctness is independently exercised by the
-    Python recurrence tests and the generated formal one-round/inverse proofs.
-
-    The benchmark itself must never depend on a deep symbolic proof search.
-    """
 
     print("=" * 88)
     print("GATE 0: One-Round Formal Symbolic Equivalence")
     print("=" * 88)
 
-    code = PREAMBLE + """
+    code = PREAMBLE + r"""
 (declare-const a (_ BitVec 32))
 (declare-const b (_ BitVec 32))
 (declare-const c (_ BitVec 32))
@@ -1104,33 +1785,52 @@ def verify_formal_equivalence_gate(
         delete=False,
         encoding="utf-8",
     ) as handle:
+
         handle.write(code)
         filename = Path(handle.name)
 
     try:
+
         started = time.perf_counter()
 
         try:
+
             proc = subprocess.run(
                 [solver_cmd, str(filename)],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
+
         except subprocess.TimeoutExpired:
-            elapsed = time.perf_counter() - started
-            print(
-                f" [FATAL] Gate 0 one-round proof timed out "
-                f"after {timeout}s ({elapsed:.3f}s)"
+
+            elapsed = (
+                time.perf_counter()
+                - started
             )
+
+            print(
+                f" [FATAL] Gate 0 timed out "
+                f"after {timeout}s "
+                f"({elapsed:.3f}s)"
+            )
+
             raise SystemExit(1)
 
-        elapsed = time.perf_counter() - started
-        result = parse_status(proc.stdout, proc.stderr)
+        elapsed = (
+            time.perf_counter()
+            - started
+        )
+
+        result = parse_status(
+            proc.stdout,
+            proc.stderr,
+        )
 
         if result != "unsat":
+
             print(
-                f" [FATAL] Gate 0 one-round proof failed: "
+                f" [FATAL] Gate 0 failed: "
                 f"{result}"
             )
 
@@ -1138,7 +1838,10 @@ def verify_formal_equivalence_gate(
                 print(proc.stdout)
 
             if proc.stderr.strip():
-                print(proc.stderr, file=sys.stderr)
+                print(
+                    proc.stderr,
+                    file=sys.stderr,
+                )
 
             raise SystemExit(1)
 
@@ -1148,6 +1851,7 @@ def verify_formal_equivalence_gate(
         )
 
     finally:
+
         try:
             filename.unlink()
         except FileNotFoundError:
@@ -1162,11 +1866,15 @@ def verify_formal_equivalence_gate(
 
 
 # ============================================================================
-# Benchmark
+# Solver utilities
 # ============================================================================
 
-def get_solver_version(solver_cmd: str) -> str:
+def get_solver_version(
+    solver_cmd: str,
+) -> str:
+
     try:
+
         proc = subprocess.run(
             [solver_cmd, "--version"],
             capture_output=True,
@@ -1188,7 +1896,11 @@ def get_solver_version(solver_cmd: str) -> str:
         return "Unknown Version"
 
 
-def run_benchmark(
+# ============================================================================
+# Collision benchmark
+# ============================================================================
+
+def run_collision_benchmark(
     rounds_list: List[int],
     diff_pattern: Dict[int, int],
     solver_cmd: str,
@@ -1197,6 +1909,7 @@ def run_benchmark(
     seed: int,
     keep_smt: bool,
 ) -> List[TrialResult]:
+
     solver_version = get_solver_version(
         solver_cmd
     )
@@ -1204,8 +1917,10 @@ def run_benchmark(
     print("=" * 88)
     print("PHASE 1: Solver Representation Benchmark")
     print("=" * 88)
+
     print(f"Solver : {solver_cmd}")
     print(f"Version: {solver_version}")
+    print(f"Mode   : collision")
     print(f"Rounds : {rounds_list}")
     print(f"Trials : {trials}")
     print(f"Timeout: {timeout}s")
@@ -1214,19 +1929,30 @@ def run_benchmark(
     print("=" * 88)
 
     rng = random.Random(seed)
+
     results: List[TrialResult] = []
 
-    representations = list(BUILDERS)
+    representations = list(
+        COLLISION_BUILDERS
+    )
 
     for rounds in rounds_list:
-        print(f"\n--- {rounds} rounds ---")
+
+        print(
+            f"\n--- {rounds} rounds ---"
+        )
 
         for trial in range(trials):
-            order = list(representations)
+
+            order = list(
+                representations
+            )
+
             rng.shuffle(order)
 
             for model in order:
-                result = run_solver_instance(
+
+                result = run_collision_instance(
                     model,
                     rounds,
                     trial + 1,
@@ -1243,11 +1969,13 @@ def run_benchmark(
 
                 if result.verified is not None:
                     verification = (
-                        f" verified={result.verified}"
+                        f" verified="
+                        f"{result.verified}"
                     )
 
                 print(
-                    f"  trial={trial + 1:2d}/{trials} "
+                    f"  trial={trial + 1:2d}/"
+                    f"{trials} "
                     f"{model:<14} "
                     f"{result.status:<8} "
                     f"{result.runtime_seconds:8.3f}s"
@@ -1262,7 +1990,112 @@ def run_benchmark(
                         "\n[FATAL] SAT witness failed "
                         "independent verification."
                     )
+
                     raise SystemExit(1)
+
+    return results
+
+
+# ============================================================================
+# Equivalence benchmark
+# ============================================================================
+
+def run_equiv_benchmark(
+    rounds_list: List[int],
+    solver_cmd: str,
+    trials: int,
+    timeout: int,
+    seed: int,
+    keep_smt: bool,
+) -> List[TrialResult]:
+
+    solver_version = get_solver_version(
+        solver_cmd
+    )
+
+    print("=" * 88)
+    print("PHASE 1: Symbolic Representation Equivalence")
+    print("=" * 88)
+
+    print(f"Solver : {solver_cmd}")
+    print(f"Version: {solver_version}")
+    print(f"Mode   : equiv")
+    print(f"Rounds : {rounds_list}")
+    print(f"Trials : {trials}")
+    print(f"Timeout: {timeout}s")
+    print(f"Seed   : {seed}")
+    print()
+    print(
+        "Property: find Std != SW"
+    )
+    print(
+        "UNSAT   = equivalent"
+    )
+    print(
+        "SAT     = counterexample"
+    )
+    print("=" * 88)
+
+    rng = random.Random(seed)
+
+    results: List[TrialResult] = []
+
+    representations = list(
+        EQUIV_BUILDERS
+    )
+
+    for rounds in rounds_list:
+
+        print(
+            f"\n--- {rounds} rounds ---"
+        )
+
+        for trial in range(trials):
+
+            order = list(
+                representations
+            )
+
+            rng.shuffle(order)
+
+            for model in order:
+
+                result = run_equiv_instance(
+                    model,
+                    rounds,
+                    trial + 1,
+                    solver_cmd,
+                    solver_version,
+                    timeout,
+                    keep_smt,
+                )
+
+                results.append(result)
+
+                if result.status == "unsat":
+                    interpretation = (
+                        "proved-equivalent"
+                    )
+
+                elif result.status == "sat":
+                    interpretation = (
+                        "COUNTEREXAMPLE"
+                    )
+
+                elif result.status == "timeout":
+                    interpretation = "timeout"
+
+                else:
+                    interpretation = result.status
+
+                print(
+                    f"  trial={trial + 1:2d}/"
+                    f"{trials} "
+                    f"{model:<14} "
+                    f"{result.status:<8} "
+                    f"{result.runtime_seconds:8.3f}s "
+                    f"{interpretation}"
+                )
 
     return results
 
@@ -1275,21 +2108,43 @@ def print_summary(
     results: List[TrialResult],
     trials: int,
 ) -> None:
+
     print("\n" + "=" * 88)
     print("BENCHMARK SUMMARY")
     print("=" * 88)
 
-    representations = [
-        "Std-Explicit",
-        "SW-Explicit",
-        "Std-Inline",
-        "SW-Inline",
-    ]
+    if not results:
+        print("No results.")
+        return
+
+    mode = results[0].mode
+
+    if mode == "equiv":
+
+        representations = [
+            "Std-Explicit",
+            "Std-Inline",
+        ]
+
+    else:
+
+        representations = [
+            "Std-Explicit",
+            "SW-Explicit",
+            "Std-Inline",
+            "SW-Inline",
+        ]
 
     for rounds in sorted(
-        {result.rounds for result in results}
+        {
+            result.rounds
+            for result in results
+        }
     ):
-        print(f"\n[Rounds: {rounds}]")
+
+        print(
+            f"\n[Rounds: {rounds}]"
+        )
 
         print(
             f"{'Model':<15} | "
@@ -1302,9 +2157,13 @@ def print_summary(
 
         print("-" * 88)
 
-        medians: Dict[str, float] = {}
+        medians: Dict[
+            str,
+            float,
+        ] = {}
 
         for model in representations:
+
             model_results = [
                 r
                 for r in results
@@ -1313,31 +2172,42 @@ def print_summary(
             ]
 
             statuses = sorted(
-                {r.status for r in model_results}
+                {
+                    r.status
+                    for r in model_results
+                }
             )
 
             successful = [
                 r
                 for r in model_results
-                if r.status in ("sat", "unsat")
+                if r.status in (
+                    "sat",
+                    "unsat",
+                )
                 and not r.timeout
             ]
 
-            # A timing comparison is valid only if every trial
-            # completed with a definite SAT/UNSAT result.
             complete = (
                 len(model_results) == trials
                 and len(successful) == trials
             )
 
             if complete:
+
                 times = [
                     r.runtime_seconds
                     for r in successful
                 ]
 
-                median = statistics.median(times)
-                mean = statistics.mean(times)
+                median = statistics.median(
+                    times
+                )
+
+                mean = statistics.mean(
+                    times
+                )
+
                 sd = (
                     statistics.stdev(times)
                     if len(times) > 1
@@ -1364,10 +2234,15 @@ def print_summary(
                 )
 
             else:
+
                 status = (
                     statuses[0]
                     if len(statuses) == 1
-                    else "MIXED"
+                    else (
+                        "MIXED"
+                        if statuses
+                        else "N/A"
+                    )
                 )
 
                 print(
@@ -1379,34 +2254,80 @@ def print_summary(
                     f"{'NO':<7}"
                 )
 
-        if (
-            "Std-Explicit" in medians
-            and "SW-Explicit" in medians
-            and medians["SW-Explicit"] > 0
-        ):
-            scaling = (
-                medians["Std-Explicit"]
-                / medians["SW-Explicit"]
-            )
+        if mode == "equiv":
 
-            direction = (
-                "SW-Explicit faster"
-                if scaling > 1.0
-                else "Std-Explicit faster"
+            if (
+                "Std-Explicit" in medians
+                and "Std-Inline" in medians
+                and medians["Std-Inline"] > 0
+            ):
+
+                scaling = (
+                    medians["Std-Explicit"]
+                    / medians["Std-Inline"]
+                )
+
+                direction = (
+                    "Std-Explicit faster"
+                    if scaling > 1.0
+                    else "Std-Inline faster"
+                )
+
+                print(
+                    f"\nStd representation "
+                    f"scaling = "
+                    f"{scaling:.3f}x "
+                    f"({direction})"
+                )
+
+            print(
+                "\nEquivalence interpretation:"
             )
 
             print(
-                f"\nPrimary metric S_{rounds} = "
-                f"{scaling:.3f}x "
-                f"({direction})"
+                "  UNSAT = Std and SW are "
+                "symbolically equivalent."
+            )
+
+            print(
+                "  SAT   = a representation "
+                "mismatch exists."
             )
 
         else:
-            print(
-                "\nPrimary metric unavailable: "
-                "one or both primary representations "
-                "did not complete all trials."
-            )
+
+            if (
+                "Std-Explicit" in medians
+                and "SW-Explicit" in medians
+                and medians["SW-Explicit"] > 0
+            ):
+
+                scaling = (
+                    medians["Std-Explicit"]
+                    / medians["SW-Explicit"]
+                )
+
+                direction = (
+                    "SW-Explicit faster"
+                    if scaling > 1.0
+                    else "Std-Explicit faster"
+                )
+
+                print(
+                    f"\nPrimary metric "
+                    f"S_{rounds} = "
+                    f"{scaling:.3f}x "
+                    f"({direction})"
+                )
+
+            else:
+
+                print(
+                    "\nPrimary metric unavailable: "
+                    "one or both primary "
+                    "representations did not "
+                    "complete all trials."
+                )
 
 
 # ============================================================================
@@ -1418,13 +2339,16 @@ def export_data(
     json_file: str,
     csv_file: str,
 ) -> None:
+
     with open(
         json_file,
         "w",
         encoding="utf-8",
     ) as handle:
+
         json.dump(
-            [asdict(result) for result in results],
+            [asdict(result)
+             for result in results],
             handle,
             indent=2,
         )
@@ -1435,9 +2359,11 @@ def export_data(
         newline="",
         encoding="utf-8",
     ) as handle:
+
         fields = [
             "solver",
             "version",
+            "mode",
             "rounds",
             "representation",
             "trial",
@@ -1456,20 +2382,29 @@ def export_data(
         writer.writeheader()
 
         for result in results:
-            writer.writerow(asdict(result))
+            writer.writerow(
+                asdict(result)
+            )
 
-    print(f"\n[+] JSON: {json_file}")
-    print(f"[+] CSV : {csv_file}")
+    print(
+        f"\n[+] JSON: {json_file}"
+    )
+
+    print(
+        f"[+] CSV : {csv_file}"
+    )
 
 
 # ============================================================================
-# CLI
+# CLI helpers
 # ============================================================================
 
 def parse_diff(
     values: Optional[List[str]],
 ) -> Dict[int, int]:
+
     if not values:
+
         return {
             4: 0x80000000,
             9: 0x80000000,
@@ -1478,33 +2413,45 @@ def parse_diff(
     result: Dict[int, int] = {}
 
     for item in values:
+
         if ":" not in item:
             raise ValueError(
                 f"Invalid --diff {item!r}; "
                 f"expected INDEX:HEX"
             )
 
-        index_text, value_text = item.split(
-            ":",
-            1,
+        index_text, value_text = (
+            item.split(":", 1)
         )
 
         try:
-            index = int(index_text, 10)
-            value = int(value_text, 16)
+
+            index = int(
+                index_text,
+                10,
+            )
+
+            value = int(
+                value_text,
+                16,
+            )
+
         except ValueError as exc:
+
             raise ValueError(
                 f"Invalid --diff {item!r}; "
                 f"expected INDEX:HEX"
             ) from exc
 
         if not 0 <= index < 16:
+
             raise ValueError(
                 f"Message-word index {index} "
                 f"is outside [0, 15]"
             )
 
         if not 0 <= value <= MASK32:
+
             raise ValueError(
                 f"Difference {value_text!r} "
                 f"is not a 32-bit value"
@@ -1515,10 +2462,14 @@ def parse_diff(
     return result
 
 
-def validate_rounds(rounds: List[int]) -> None:
+def validate_rounds(
+    rounds: List[int],
+) -> None:
+
     if not rounds:
         raise ValueError(
-            "At least one round count is required."
+            "At least one round count "
+            "is required."
         )
 
     invalid = [
@@ -1528,17 +2479,23 @@ def validate_rounds(rounds: List[int]) -> None:
     ]
 
     if invalid:
+
         raise ValueError(
             f"Round counts must be in [1, 64]: "
             f"{invalid}"
         )
 
 
+# ============================================================================
+# Main
+# ============================================================================
+
 def main() -> int:
+
     parser = argparse.ArgumentParser(
         description=(
-            "SHA-256 sliding-window representation "
-            "benchmark"
+            "SHA-256 sliding-window "
+            "representation benchmark"
         )
     )
 
@@ -1550,10 +2507,50 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--mode",
+        choices=[
+            "collision",
+            "equiv",
+        ],
+        default="collision",
+        help=(
+            "Benchmark mode: collision "
+            "or symbolic equivalence"
+        ),
+    )
+
+    parser.add_argument(
         "--rounds",
         nargs="+",
         type=int,
-        default=[16, 20, 24, 28, 30],
+        default=[
+            16,
+            20,
+            24,
+            28,
+            30,
+        ],
+        help=(
+            "Collision benchmark rounds"
+        ),
+    )
+
+    parser.add_argument(
+        "--equiv-rounds",
+        nargs="+",
+        type=int,
+        default=[
+            8,
+            16,
+            24,
+            32,
+            48,
+            64,
+        ],
+        help=(
+            "Round counts used by "
+            "--mode equiv"
+        ),
     )
 
     parser.add_argument(
@@ -1566,6 +2563,20 @@ def main() -> int:
         "--timeout",
         type=int,
         default=120,
+        help=(
+            "Collision solver timeout "
+            "per instance"
+        ),
+    )
+
+    parser.add_argument(
+        "--equiv-timeout",
+        type=int,
+        default=120,
+        help=(
+            "Equivalence solver timeout "
+            "per instance"
+        ),
     )
 
     parser.add_argument(
@@ -1579,15 +2590,18 @@ def main() -> int:
         nargs="+",
         metavar="INDEX:HEX",
         help=(
-            "Message-word XOR constraint, e.g. "
-            "--diff 4:80000000 9:80000000"
+            "Message-word XOR constraint, "
+            "e.g. --diff "
+            "4:80000000 9:80000000"
         ),
     )
 
     parser.add_argument(
         "--keep-smt",
         action="store_true",
-        help="Keep generated SMT-LIB2 files",
+        help=(
+            "Keep generated SMT-LIB2 files"
+        ),
     )
 
     parser.add_argument(
@@ -1603,13 +2617,22 @@ def main() -> int:
     parser.add_argument(
         "--skip-gate",
         action="store_true",
-        help="Skip formal equivalence gate",
+        help=(
+            "Skip formal equivalence gate"
+        ),
     )
 
     args = parser.parse_args()
 
     try:
-        validate_rounds(args.rounds)
+
+        validate_rounds(
+            args.rounds
+        )
+
+        validate_rounds(
+            args.equiv_rounds
+        )
 
         if args.trials < 1:
             raise ValueError(
@@ -1621,17 +2644,32 @@ def main() -> int:
                 "--timeout must be >= 1"
             )
 
-        diff = parse_diff(args.diff)
+        if args.equiv_timeout < 1:
+            raise ValueError(
+                "--equiv-timeout must be >= 1"
+            )
+
+        diff = parse_diff(
+            args.diff
+        )
 
     except ValueError as exc:
-        parser.error(str(exc))
+
+        parser.error(
+            str(exc)
+        )
 
     print("=" * 88)
     print("SHA256SW REPRESENTATION BENCHMARK")
     print("=" * 88)
 
     print(
-        f"Constants: {len(K)} FIPS 180-4 words"
+        f"Mode     : {args.mode}"
+    )
+
+    print(
+        f"Constants: {len(K)} "
+        f"FIPS 180-4 words"
     )
 
     print(
@@ -1640,37 +2678,73 @@ def main() -> int:
 
     print()
 
+    # ------------------------------------------------------------------------
     # Phase 0
-    for rounds in (16, 32, 64):
+    # ------------------------------------------------------------------------
+
+    for rounds in (
+        16,
+        32,
+        64,
+    ):
+
         check_sw_recurrence(
             rounds,
             trials=250,
         )
 
+    # ------------------------------------------------------------------------
     # Gate 0
+    # ------------------------------------------------------------------------
+
     if not args.skip_gate:
+
         verify_formal_equivalence_gate(
             args.solver,
-            args.rounds,
-            args.timeout,
+            min(
+                args.equiv_timeout,
+                args.timeout,
+            ),
         )
+
     else:
+
         print(
-            "[WARNING] Formal equivalence gate skipped."
+            "[WARNING] Formal equivalence "
+            "gate skipped."
         )
 
-    # Phase 1 / 2
-    results = run_benchmark(
-        args.rounds,
-        diff,
-        args.solver,
-        args.trials,
-        args.timeout,
-        args.seed,
-        args.keep_smt,
-    )
+    # ------------------------------------------------------------------------
+    # Phase 1
+    # ------------------------------------------------------------------------
 
+    if args.mode == "collision":
+
+        results = run_collision_benchmark(
+            args.rounds,
+            diff,
+            args.solver,
+            args.trials,
+            args.timeout,
+            args.seed,
+            args.keep_smt,
+        )
+
+    else:
+
+        results = run_equiv_benchmark(
+            args.equiv_rounds,
+            args.solver,
+            args.trials,
+            args.equiv_timeout,
+            args.seed,
+            args.keep_smt,
+        )
+
+    # ------------------------------------------------------------------------
     # Phase 3
+    # ------------------------------------------------------------------------
+
     print_summary(
         results,
         args.trials,
@@ -1686,4 +2760,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        main()
+    )
