@@ -5,17 +5,19 @@ Comparative cryptanalytic and constraint-modeling benchmark for SHA-256.
 
 Methodological structure:
   Static Validation : Verifies FIPS 180-4 constants and state invariants.
-  Phase 0           : Direct Python recurrence verification (16, 32, 64 rounds).
+  Phase 0           : Independent Python reference check against hashlib.sha256
+                      + Direct Python recurrence verification (16, 32, 64 rounds).
   Gate 0            : Formal symbolic equivalence gate via SMT (Std == SW on symbolic IV/W).
   Phase 1           : Comparative multi-trial benchmark with randomized execution order.
   Phase 2           : Independent pure-Python verification of all SAT collision witnesses.
-  Phase 3           : Structured reporting and machine-readable JSON/CSV export.
+  Phase 3           : Censored survival-rate statistics, primary metric (S_R), and JSON/CSV export.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import random
@@ -65,7 +67,7 @@ assert len(IV) == 8, f"Invariant violation: len(IV) must be 8, got {len(IV)}"
 assert K[34] == 0x4d2c6dfc, f"Invariant violation: K[34] expected 0x4d2c6dfc, got {hex(K[34])}"
 
 # ============================================================================
-# Independent Python SHA-256 Engine (Non-sliding verification reference)
+# Independent Python SHA-256 Engine (Reference & Verification)
 # ============================================================================
 
 def rotr_py(x: int, n: int) -> int:
@@ -104,14 +106,7 @@ def sha256_reduced_compress_py(iv: List[int], words: List[int], rounds: int) -> 
     for i in range(rounds):
         t1 = (h + big_sigma1(e) + ch(e, f, g) + K[i] + w[i]) & MASK32
         t2 = (big_sigma0(a) + maj(a, b, c)) & MASK32
-        h = g
-        g = f
-        f = e
-        e = (d + t1) & MASK32
-        d = c
-        c = b
-        b = a
-        a = (t1 + t2) & MASK32
+        h, g, f, e, d, c, b, a = g, f, e, (d + t1) & MASK32, c, b, a, (t1 + t2) & MASK32
 
     return [
         (iv[0] + a) & MASK32, (iv[1] + b) & MASK32,
@@ -119,6 +114,37 @@ def sha256_reduced_compress_py(iv: List[int], words: List[int], rounds: int) -> 
         (iv[4] + e) & MASK32, (iv[5] + f) & MASK32,
         (iv[6] + g) & MASK32, (iv[7] + h) & MASK32
     ]
+
+def verify_python_reference_against_hashlib() -> None:
+    """Verifies the pure-Python reference implementation against hashlib.sha256 across multiple block sizes."""
+    def sha256_full_py(data: bytes) -> bytes:
+        bit_len = len(data) * 8
+        padded = bytearray(data)
+        padded.append(0x80)
+        while (len(padded) % 64) != 56:
+            padded.append(0x00)
+        padded.extend(bit_len.to_bytes(8, "big"))
+
+        state = list(IV)
+        for offset in range(0, len(padded), 64):
+            block = padded[offset : offset + 64]
+            words = [int.from_bytes(block[i * 4 : (i + 1) * 4], "big") for i in range(16)]
+            state = sha256_reduced_compress_py(state, words, 64)
+
+        return b"".join(x.to_bytes(4, "big") for x in state)
+
+    rng = random.Random(0x1337)
+    test_suite = [
+        b"", b"a", b"abc", b"a" * 55, b"a" * 56, b"a" * 63, b"a" * 64, b"a" * 65, b"a" * 1000
+    ] + [rng.randbytes(n) for n in [7, 63, 64, 128, 256, 1024, 4096]]
+
+    for msg in test_suite:
+        actual = sha256_full_py(msg)
+        expected = hashlib.sha256(msg).digest()
+        if actual != expected:
+            raise AssertionError(f"Python SHA-256 reference mismatch on input length {len(msg)}")
+
+    print(" [PASS] Python Reference Validation against hashlib.sha256 -> 100% MATCH across all lengths")
 
 def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
     """Directly tests SW recurrence equations against standard recurrence in Python."""
@@ -137,9 +163,9 @@ def check_sw_recurrence(rounds: int, trials: int = 250) -> None:
             exp_a = (t1 + t2) & MASK32
             exp_e = (d + t1) & MASK32
 
-            sw_t1 = (b_mt[i] + big_sigma1(b_mt[i+3]) + ch(b_mt[i+3], b_mt[i+2], b_mt[i+1]) + K[i] + w[i]) & MASK32
+            sw_t1 = (b_mt[i] + big_sigma1(b_mt[i + 3]) + ch(b_mt[i + 3], b_mt[i + 2], b_mt[i + 1]) + K[i] + w[i]) & MASK32
             sw_b_next = (a_mt[i] + sw_t1) & MASK32
-            sw_t2 = (big_sigma0(a_mt[i+3]) + maj(a_mt[i+3], a_mt[i+2], a_mt[i+1])) & MASK32
+            sw_t2 = (big_sigma0(a_mt[i + 3]) + maj(a_mt[i + 3], a_mt[i + 2], a_mt[i + 1])) & MASK32
             sw_a_next = ((sw_b_next - a_mt[i]) + sw_t2) & MASK32
 
             if sw_b_next != exp_e or sw_a_next != exp_a:
@@ -256,7 +282,6 @@ def build_sw_explicit(rounds: int, diff_pattern: Dict[int, int]) -> str:
             lines.append(f"(assert (= {p}b_mt_{i+4} (bvadd {p}a_mt_{i} {p}t1_{i})))")
             lines.append(f"(assert (= {p}a_mt_{i+4} (bvadd (bvsub {p}b_mt_{i+4} {p}a_mt_{i}) {p}t2_{i})))")
 
-    # Collision mapping
     mappings = [(IV[0], "a", rounds+3), (IV[1], "a", rounds+2), (IV[2], "a", rounds+1), (IV[3], "a", rounds),
                 (IV[4], "b", rounds+3), (IV[5], "b", rounds+2), (IV[6], "b", rounds+1), (IV[7], "b", rounds)]
     for iv_val, fam, idx in mappings:
@@ -486,6 +511,103 @@ def verify_formal_equivalence_gate(solver_cmd: str, rounds_to_verify: List[int])
     print("Gate 0 passed: Equivalence holds across all target round depths.\n")
 
 # ============================================================================
+# Statistical Analysis Engine (Survival & Censored Data Modeling)
+# ============================================================================
+
+def compute_censored_stats(m_res: List[TrialResult], trials: int, timeout: int) -> Dict[str, Any]:
+    completed = [r.runtime_seconds for r in m_res if r.status in ("sat", "unsat")]
+    n_comp = len(completed)
+    n_timeout = sum(1 for r in m_res if r.status == "timeout")
+    n_err = sum(1 for r in m_res if r.status not in ("sat", "unsat", "timeout"))
+
+    comp_ratio = f"{n_comp}/{trials}"
+    statuses = sorted(list(set(r.status for r in m_res)))
+    stat_str = statuses[0] if len(statuses) == 1 else "MIXED"
+
+    verif_vals = [r.verified for r in m_res if r.verified is not None]
+    ver_str = "VALID" if (verif_vals and all(verif_vals)) else ("FAIL" if False in verif_vals else "N/A")
+
+    if n_comp == 0:
+        return {
+            "status": stat_str,
+            "comp_ratio": comp_ratio,
+            "median_val": None,
+            "median_str": f">{timeout:.0f}s" if n_timeout > 0 else "ERR",
+            "mean_str": "N/A",
+            "sd_str": "N/A",
+            "timeouts": n_timeout,
+            "errors": n_err,
+            "ver_str": ver_str
+        }
+
+    sorted_all = sorted(completed) + [float("inf")] * (trials - n_comp)
+    med_finite = (n_comp >= (trials + 1) // 2) if (trials % 2 == 1) else (n_comp >= (trials // 2) + 1)
+
+    if med_finite:
+        med_val = statistics.median(sorted_all)
+        med_str = f"{med_val:.3f}"
+        mean_str = f"{statistics.mean(completed):.3f}" if n_comp == trials else f">={statistics.mean(completed):.3f}"
+        sd_str = f"{statistics.stdev(completed):.3f}" if n_comp > 1 else "0.000"
+    else:
+        med_val = None
+        med_str = f">{timeout:.0f}s"
+        mean_str = f">{timeout:.0f}s"
+        sd_str = "censored"
+
+    return {
+        "status": stat_str,
+        "comp_ratio": comp_ratio,
+        "median_val": med_val,
+        "median_str": med_str,
+        "mean_str": mean_str,
+        "sd_str": sd_str,
+        "timeouts": n_timeout,
+        "errors": n_err,
+        "ver_str": ver_str
+    }
+
+def print_summary_and_scaling(results: List[TrialResult], trials: int, timeout: int) -> None:
+    print("\n" + "=" * 96)
+    print("BENCHMARK SUMMARY & PRIMARY SCALING METRIC (S_R)")
+    print("=" * 96)
+
+    rounds_set = sorted(list(set(r.rounds for r in results)))
+    for r in rounds_set:
+        print(f"\n[Rounds: {r}]")
+        header = f"{'Model':<15} | {'Completed':<10} | {'Status':<7} | {'Median (s)':<11} | {'Mean (s)':<10} | {'StdDev (s)':<10} | {'Timeouts':<8} | {'Verified'}"
+        print(header)
+        print("-" * len(header))
+
+        stats_by_model: Dict[str, Dict[str, Any]] = {}
+
+        for model in ["Std-Explicit", "SW-Explicit", "Std-Inline", "SW-Inline"]:
+            m_res = [res for res in results if res.rounds == r and res.representation == model]
+            st = compute_censored_stats(m_res, trials, timeout)
+            stats_by_model[model] = st
+            print(f"{model:<15} | {st['comp_ratio']:<10} | {st['status']:<7} | {st['median_str']:<11} | {st['mean_str']:<10} | {st['sd_str']:<10} | {st['timeouts']:<8d} | {st['ver_str']}")
+
+        std_st = stats_by_model.get("Std-Explicit")
+        sw_st = stats_by_model.get("SW-Explicit")
+
+        if std_st and sw_st:
+            t_std = std_st["median_val"]
+            t_sw = sw_st["median_val"]
+
+            if t_std is not None and t_sw is not None:
+                if t_sw > 0:
+                    s_r = t_std / t_sw
+                    fav = "SW-Explicit faster" if s_r > 1.0 else "Std-Explicit faster"
+                    print(f"  --> Primary Metric S_{r} = {s_r:.3f}x ({fav})")
+            elif t_sw is not None and t_std is None:
+                bound = timeout / t_sw
+                print(f"  --> Primary Metric S_{r} > {bound:.2f}x (Std-Explicit timed out on {std_st['timeouts']}/{trials} trials)")
+            elif t_std is not None and t_sw is None:
+                bound = t_std / timeout
+                print(f"  --> Primary Metric S_{r} < {bound:.2f}x (SW-Explicit timed out on {sw_st['timeouts']}/{trials} trials)")
+            else:
+                print(f"  --> Primary Metric S_{r} = N/A (both representations timed out on majority of trials)")
+
+# ============================================================================
 # Main Benchmark Execution Engine
 # ============================================================================
 
@@ -513,7 +635,7 @@ def run_benchmark(rounds_list: List[int], diff_pattern: Dict[int, int], solver_c
         models = list(BUILDERS.keys())
 
         for trial in range(trials):
-            rng.shuffle(models) # Eliminate order / thermal bias
+            rng.shuffle(models)
             for model in models:
                 res = run_solver_instance(model, r, trial, diff_pattern, solver_cmd, solver_ver, timeout, keep_smt)
                 all_results.append(res)
@@ -526,55 +648,11 @@ def run_benchmark(rounds_list: List[int], diff_pattern: Dict[int, int], solver_c
 
     return all_results
 
-def print_summary_and_scaling(results: List[TrialResult]) -> None:
-    print("\n" + "=" * 88)
-    print("BENCHMARK SUMMARY & PRIMARY SCALING METRIC (S_R)")
-    print("=" * 88)
-
-    rounds_set = sorted(list(set(r.rounds for r in results)))
-    for r in rounds_set:
-        print(f"\n[Rounds: {r}]")
-        header = f"{'Model':<15} | {'Status':<7} | {'Median (s)':<10} | {'Mean (s)':<9} | {'StdDev (s)':<10} | {'Timeouts':<8} | {'Verified'}"
-        print(header)
-        print("-" * len(header))
-
-        med_times: Dict[str, float] = {}
-
-        for model in ["Std-Explicit", "SW-Explicit", "Std-Inline", "SW-Inline"]:
-            m_res = [res for res in results if res.rounds == r and res.representation == model]
-            valid_times = [res.runtime_seconds for res in m_res if not res.timeout]
-            statuses = sorted(list(set(res.status for res in m_res)))
-            stat_str = statuses[0] if len(statuses) == 1 else "MIXED"
-            timeouts = sum(1 for res in m_res if res.timeout)
-
-            verif_vals = [res.verified for res in m_res if res.verified is not None]
-            ver_str = "VALID" if (verif_vals and all(verif_vals)) else ("FAIL" if False in verif_vals else "N/A")
-
-            if valid_times:
-                med_t = statistics.median(valid_times)
-                mean_t = statistics.mean(valid_times)
-                sd_t = statistics.stdev(valid_times) if len(valid_times) > 1 else 0.0
-                med_times[model] = med_t
-                print(f"{model:<15} | {stat_str:<7} | {med_t:<10.3f} | {mean_t:<9.3f} | {sd_t:<10.3f} | {timeouts:<8d} | {ver_str}")
-            else:
-                print(f"{model:<15} | {'TIMEOUT':<7} | {'>'+str(m_res[0].runtime_seconds):<10} | {'N/A':<9} | {'N/A':<10} | {timeouts:<8d} | {ver_str}")
-
-        # Primary metric S_R calculation
-        if "Std-Explicit" in med_times and "SW-Explicit" in med_times:
-            t_std = med_times["Std-Explicit"]
-            t_sw = med_times["SW-Explicit"]
-            if t_sw > 0:
-                s_r = t_std / t_sw
-                fav = "SW-Explicit faster" if s_r > 1.0 else "Std-Explicit faster"
-                print(f"  --> Primary Scaling Metric S_{r} = {s_r:.3f}x ({fav})")
-
 def export_data(results: List[TrialResult], json_file: str, csv_file: str) -> None:
-    # JSON Export
     with open(json_file, "w", encoding="utf-8") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
     print(f"\n[+] Results exported to JSON: {json_file}")
 
-    # CSV Export
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "solver", "version", "rounds", "representation", "trial",
@@ -604,7 +682,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Parse message difference
     diff_pattern: Dict[int, int] = {}
     if args.diff:
         for item in args.diff:
@@ -618,7 +695,8 @@ def main() -> None:
     print("=" * 88)
 
     if not args.no_sanity:
-        print("\n[PHASE 0] Direct Python Recurrence Invariant Checks...")
+        print("\n[PHASE 0] Validating Python Reference against hashlib.sha256 & Recurrence Checks...")
+        verify_python_reference_against_hashlib()
         for r in (16, 32, 64):
             check_sw_recurrence(r, trials=250)
         verify_formal_equivalence_gate(args.solver, args.rounds)
@@ -633,7 +711,7 @@ def main() -> None:
         keep_smt=args.keep_smt
     )
 
-    print_summary_and_scaling(results)
+    print_summary_and_scaling(results, args.trials, args.timeout)
     export_data(results, args.json_output, args.csv_output)
 
 if __name__ == "__main__":
