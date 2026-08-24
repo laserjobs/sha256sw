@@ -1,13 +1,21 @@
 # SHA256SW: Sliding-Window Representation & Cryptanalytic Benchmark
 
-An endian-independent, formally audited implementation of SHA-256 alongside a comparative QF_BV constraint benchmark testing the sliding-window state formulation in automated SAT/SMT collision searches.
+An endian-independent, portable C11 implementation of SHA-256 alongside machine-checked SMT equivalence proofs (QF_BV) and an automated SAT/SMT search benchmark comparing standard vs sliding-window state formulations.
 
 [![CI](https://github.com/laserjobs/sha256sw/actions/workflows/ci.yml/badge.svg)](https://github.com/laserjobs/sha256sw/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
-## 1. Mathematical Architecture
+## 1. Scope & Research Methodology
+
+* **Machine-Checked SMT Equivalence**: The repository includes formal SMT-LIB2 bit-vector proofs (`formal/` and `Gate 0`) verifying that the sliding-window coordinate formulation $(a\_mt, b\_mt)$ is mathematically identical to FIPS 180-4 across all 64 compression rounds for arbitrary symbolic inputs.
+* **Empirical Search Benchmark**: The benchmark measures empirical solver wall-clock time and completion rates on reduced-round collision instances. It evaluates whether eliminating register-copy equations improves solver search speed; it does **not** make causal claims regarding internal CDCL conflict-graph mechanics without dedicated backend instrumentation.
+* **Independent Reference Verification**: All `sat` solutions represent verified collisions on the reduced-round compression function ($H_R(IV, M_1) = H_R(IV, M_2)$), checked against an independent pure-Python engine validated against `hashlib.sha256`.
+
+---
+
+## 2. Mathematical Architecture
 
 Standard FIPS 180-4 SHA-256 maintains 8 state words $(A, B, C, D, E, F, G, H)$ and 6 register shifts per round. The **SHA256SW** formulation maintains two sliding histories $a\_mt$ and $b\_mt$:
 
@@ -35,14 +43,14 @@ b\_mt[i] &= T_1 - \left(\Sigma_1(b\_mt[i+3]) + \text{Ch}(b\_mt[i+3], b\_mt[i+2],
 
 ---
 
-## 2. Quickstart
+## 3. Quickstart
 
-### Build & Run C Tests
+### Build & Run C Test Suite
 ```bash
 make test
 ```
 
-### Run Formal Equivalence Proofs (Z3)
+### Run Strict Formal Equivalence Proofs (Z3)
 ```bash
 make formal
 ```
@@ -54,26 +62,25 @@ python3 benchmark/sha256_representation_benchmark.py z3 --rounds 16 20 24 28 30 
 
 ---
 
-## 3. Pre-Registered Benchmark Metric
+## 4. Pre-Registered Primary Metric
 
 $$\mathcal{S}_R = \frac{\operatorname{median}\left(T_{\text{Std-Explicit},\, R}\right)}{\operatorname{median}\left(T_{\text{SW-Explicit},\, R}\right)}$$
 
 * **`Std-Explicit`**: Standard FIPS 180-4 formulation with explicit register-copy equality assertions ($B_{i+1}=A_i, \dots$).
 * **`SW-Explicit`**: Sliding-window coordinate formulation (zero register-copy equations).
-* **Witness Verification**: Every `sat` model is extracted and validated against an independent pure-Python SHA-256 compression function.
+* **Survival Modeling**: Timeouts are treated as right-censored observations. If $\ge 50\%$ of trials time out, medians are reported as `>{timeout}s` and $\mathcal{S}_R$ is bounded accordingly.
 
 ---
 
-## 4. Citation
+## 5. License & Citation
 
-If you use this benchmark or coordinate representation in cryptanalytic research:
+Licensed under the [MIT License](LICENSE).
 
 ```bibtex
 @misc{sha256sw2026,
   author = {SHA256SW Contributors},
   title = {SHA256SW: Sliding-Window State Representation and Cryptanalytic Benchmark for SHA-256},
   year = {2026},
-  url = {https://github.com/username/sha256sw}
+  url = {https://github.com/laserjobs/sha256sw}
 }
 ```
-
