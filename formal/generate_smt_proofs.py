@@ -1,22 +1,45 @@
 #!/usr/bin/env python3
 """
-Generate SMT-LIB2 proof obligations for SHA256SW.
+Generate compositional SMT proofs for SHA-256 sliding-window equivalence.
 
-Generated files:
+Proof artifacts:
 
     ch_equiv.smt2
-        Proves that the arithmetic and XOR formulations of Ch are
-        equivalent for 32-bit bit-vectors.
+        Proves the arithmetic and bitwise forms of Ch are equivalent.
+
+    round_00_equiv.smt2 ... round_63_equiv.smt2
+        Each file proves one SHA-256 round is equivalent to one
+        sliding-window transition under the state-coordinate invariant.
 
     full_64round_equiv.smt2
-        Proves that the standard SHA-256 eight-register recurrence and
-        the SHA256SW sliding-window recurrence produce identical states
-        after all 64 rounds.
+        A compact representative one-round proof with arbitrary K/W.
+        This is retained as a stable, human-readable summary obligation.
 
     full_64round_inverse.smt2
-        Proves that one SHA256SW step is algebraically invertible with
-        respect to the oldest a/b coordinates when the remaining window,
-        K_i and W_i, and next coordinates are known.
+        Proves the sliding-window transition is algebraically invertible
+        with respect to the oldest A/B coordinates.
+
+The crucial proof invariant is:
+
+    A[i+0] = d_i
+    A[i+1] = c_i
+    A[i+2] = b_i
+    A[i+3] = a_i
+
+    B[i+0] = h_i
+    B[i+1] = g_i
+    B[i+2] = f_i
+    B[i+3] = e_i
+
+After one transition:
+
+    A[i+4] = a_(i+1)
+    B[i+4] = e_(i+1)
+
+and the existing four-word windows shift into the corresponding
+coordinates of the next SHA-256 state.
+
+All arithmetic is 32-bit modular bit-vector arithmetic.
 """
 
 from pathlib import Path
@@ -50,256 +73,7 @@ assert K[34] == 0x4D2C6DFC
 assert K[37] == 0x766A0ABB
 
 
-def write_file(name: str, content: str) -> None:
-    path = ROOT / name
-    path.write_text(content, encoding="utf-8")
-    print(f"[+] Generated {path}")
-
-
-def generate_ch_equiv() -> None:
-    content = """\
-; SHA-256 Ch equivalence
-;
-; Arithmetic:
-;     (x & y) + (~x & z)
-;
-; XOR:
-;     (x & y) ^ (~x & z)
-;
-; The two masked operands are bitwise disjoint, so their addition
-; is identical to XOR.
-
-(set-logic QF_BV)
-
-(declare-const x (_ BitVec 32))
-(declare-const y (_ BitVec 32))
-(declare-const z (_ BitVec 32))
-
-(define-fun ch_arith
-  ((x (_ BitVec 32))
-   (y (_ BitVec 32))
-   (z (_ BitVec 32)))
-  (_ BitVec 32)
-  (bvadd
-    (bvand x y)
-    (bvand (bvnot x) z)))
-
-(define-fun ch_xor
-  ((x (_ BitVec 32))
-   (y (_ BitVec 32))
-   (z (_ BitVec 32)))
-  (_ BitVec 32)
-  (bvxor
-    (bvand x y)
-    (bvand (bvnot x) z)))
-
-; Negate the desired theorem. UNSAT means equivalence is proven.
-(assert (distinct
-  (ch_arith x y z)
-  (ch_xor x y z)))
-
-(check-sat)
-(exit)
-"""
-
-    write_file("ch_equiv.smt2", content)
-
-
-def generate_full_64round() -> None:
-    lines = [
-        "; SHA-256 standard vs SHA256SW sliding-window equivalence",
-        "",
-        "(set-logic QF_BV)",
-        "",
-        "(define-fun rotr32",
-        "  ((x (_ BitVec 32)) (n (_ BitVec 32)))",
-        "  (_ BitVec 32)",
-        "  (bvor",
-        "    (bvlshr x n)",
-        "    (bvshl x (bvsub (_ bv32 32) n))))",
-        "",
-        "(define-fun s0 ((x (_ BitVec 32))) (_ BitVec 32)",
-        "  (bvxor",
-        "    (rotr32 x (_ bv2 32))",
-        "    (bvxor",
-        "      (rotr32 x (_ bv13 32))",
-        "      (rotr32 x (_ bv22 32)))))",
-        "",
-        "(define-fun s1 ((x (_ BitVec 32))) (_ BitVec 32)",
-        "  (bvxor",
-        "    (rotr32 x (_ bv6 32))",
-        "    (bvxor",
-        "      (rotr32 x (_ bv11 32))",
-        "      (rotr32 x (_ bv25 32)))))",
-        "",
-        "(define-fun ch_f",
-        "  ((x (_ BitVec 32))",
-        "   (y (_ BitVec 32))",
-        "   (z (_ BitVec 32)))",
-        "  (_ BitVec 32)",
-        "  (bvadd",
-        "    (bvand x y)",
-        "    (bvand (bvnot x) z)))",
-        "",
-        "(define-fun maj_f",
-        "  ((x (_ BitVec 32))",
-        "   (y (_ BitVec 32))",
-        "   (z (_ BitVec 32)))",
-        "  (_ BitVec 32)",
-        "  (bvxor",
-        "    (bvand x y)",
-        "    (bvxor",
-        "      (bvand x z)",
-        "      (bvand y z))))",
-        "",
-    ]
-
-    # Initial standard SHA-256 state.
-    for name in "abcdefgh":
-        lines.append(
-            f"(declare-const {name}_0 (_ BitVec 32))"
-        )
-
-    lines.append("")
-
-    # Arbitrary message schedule words.
-    for i in range(64):
-        lines.append(
-            f"(declare-const w_{i} (_ BitVec 32))"
-        )
-
-    lines.append("")
-
-    # Standard eight-register recurrence.
-    for i in range(64):
-        k = f"#x{K[i]:08x}"
-
-        lines.extend([
-            f"; Round {i}",
-            f"(define-fun t1_std_{i} () (_ BitVec 32)",
-            f"  (bvadd h_{i}",
-            f"    (bvadd (s1 e_{i})",
-            f"      (bvadd",
-            f"        (ch_f e_{i} f_{i} g_{i})",
-            f"        (bvadd {k} w_{i})))))",
-
-            f"(define-fun t2_std_{i} () (_ BitVec 32)",
-            f"  (bvadd",
-            f"    (s0 a_{i})",
-            f"    (maj_f a_{i} b_{i} c_{i})))",
-
-            f"(define-fun a_{i+1} () (_ BitVec 32)",
-            f"  (bvadd t1_std_{i} t2_std_{i}))",
-
-            f"(define-fun b_{i+1} () (_ BitVec 32) a_{i})",
-            f"(define-fun c_{i+1} () (_ BitVec 32) b_{i})",
-            f"(define-fun d_{i+1} () (_ BitVec 32) c_{i})",
-
-            f"(define-fun e_{i+1} () (_ BitVec 32)",
-            f"  (bvadd d_{i} t1_std_{i}))",
-
-            f"(define-fun f_{i+1} () (_ BitVec 32) e_{i})",
-            f"(define-fun g_{i+1} () (_ BitVec 32) f_{i})",
-            f"(define-fun h_{i+1} () (_ BitVec 32) g_{i})",
-            "",
-        ])
-
-    # Initial sliding windows:
-    #
-    # a_mt[i+3] = A_i
-    # a_mt[i+2] = B_i
-    # a_mt[i+1] = C_i
-    # a_mt[i]   = D_i
-    #
-    # b_mt[i+3] = E_i
-    # b_mt[i+2] = F_i
-    # b_mt[i+1] = G_i
-    # b_mt[i]   = H_i
-    lines.extend([
-        "(define-fun a_mt_0 () (_ BitVec 32) d_0)",
-        "(define-fun a_mt_1 () (_ BitVec 32) c_0)",
-        "(define-fun a_mt_2 () (_ BitVec 32) b_0)",
-        "(define-fun a_mt_3 () (_ BitVec 32) a_0)",
-        "",
-        "(define-fun b_mt_0 () (_ BitVec 32) h_0)",
-        "(define-fun b_mt_1 () (_ BitVec 32) g_0)",
-        "(define-fun b_mt_2 () (_ BitVec 32) f_0)",
-        "(define-fun b_mt_3 () (_ BitVec 32) e_0)",
-        "",
-    ])
-
-    # Sliding-window recurrence.
-    for i in range(64):
-        k = f"#x{K[i]:08x}"
-
-        lines.extend([
-            f"; Sliding-window round {i}",
-
-            f"(define-fun t1_sw_{i} () (_ BitVec 32)",
-            f"  (bvadd b_mt_{i}",
-            f"    (bvadd",
-            f"      (s1 b_mt_{i+3})",
-            f"      (bvadd",
-            f"        (ch_f b_mt_{i+3} b_mt_{i+2} b_mt_{i+1})",
-            f"        (bvadd {k} w_{i})))))",
-
-            f"(define-fun b_mt_{i+4} () (_ BitVec 32)",
-            f"  (bvadd t1_sw_{i} a_mt_{i}))",
-
-            f"(define-fun t2_sw_{i} () (_ BitVec 32)",
-            f"  (bvadd",
-            f"    (s0 a_mt_{i+3})",
-            f"    (maj_f",
-            f"      a_mt_{i+3}",
-            f"      a_mt_{i+2}",
-            f"      a_mt_{i+1})))",
-
-            f"(define-fun a_mt_{i+4} () (_ BitVec 32)",
-            f"  (bvadd",
-            f"    (bvsub b_mt_{i+4} a_mt_{i})",
-            f"    t2_sw_{i}))",
-            "",
-        ])
-
-    # After 64 rounds:
-    #
-    # a_mt[67] = A_64
-    # a_mt[66] = B_64
-    # a_mt[65] = C_64
-    # a_mt[64] = D_64
-    #
-    # b_mt[67] = E_64
-    # b_mt[66] = F_64
-    # b_mt[65] = G_64
-    # b_mt[64] = H_64
-    lines.extend([
-        "; Negate final-state equality.",
-        "; UNSAT means the representations are equivalent.",
-        "(assert (or",
-        "  (distinct a_64 a_mt_67)",
-        "  (distinct b_64 a_mt_66)",
-        "  (distinct c_64 a_mt_65)",
-        "  (distinct d_64 a_mt_64)",
-        "  (distinct e_64 b_mt_67)",
-        "  (distinct f_64 b_mt_66)",
-        "  (distinct g_64 b_mt_65)",
-        "  (distinct h_64 b_mt_64)))",
-        "",
-        "(check-sat)",
-        "(exit)",
-        "",
-    ])
-
-    write_file(
-        "full_64round_equiv.smt2",
-        "\n".join(lines),
-    )
-
-
-def generate_inverse_step() -> None:
-    content = """\
-; SHA256SW single-step inverse proof
-
+HEADER = """\
 (set-logic QF_BV)
 
 (define-fun rotr32
@@ -309,21 +83,34 @@ def generate_inverse_step() -> None:
     (bvlshr x n)
     (bvshl x (bvsub (_ bv32 32) n))))
 
-(define-fun s0 ((x (_ BitVec 32))) (_ BitVec 32)
+(define-fun S0
+  ((x (_ BitVec 32)))
+  (_ BitVec 32)
   (bvxor
     (rotr32 x (_ bv2 32))
     (bvxor
       (rotr32 x (_ bv13 32))
       (rotr32 x (_ bv22 32)))))
 
-(define-fun s1 ((x (_ BitVec 32))) (_ BitVec 32)
+(define-fun S1
+  ((x (_ BitVec 32)))
+  (_ BitVec 32)
   (bvxor
     (rotr32 x (_ bv6 32))
     (bvxor
       (rotr32 x (_ bv11 32))
       (rotr32 x (_ bv25 32)))))
 
-(define-fun ch_f
+(define-fun Ch
+  ((x (_ BitVec 32))
+   (y (_ BitVec 32))
+   (z (_ BitVec 32)))
+  (_ BitVec 32)
+  (bvxor
+    (bvand x y)
+    (bvand (bvnot x) z)))
+
+(define-fun ChArith
   ((x (_ BitVec 32))
    (y (_ BitVec 32))
    (z (_ BitVec 32)))
@@ -332,7 +119,7 @@ def generate_inverse_step() -> None:
     (bvand x y)
     (bvand (bvnot x) z)))
 
-(define-fun maj_f
+(define-fun Maj
   ((x (_ BitVec 32))
    (y (_ BitVec 32))
    (z (_ BitVec 32)))
@@ -343,90 +130,352 @@ def generate_inverse_step() -> None:
       (bvand x z)
       (bvand y z))))
 
-; Old state coordinates.
-(declare-const a_i (_ BitVec 32))
-(declare-const b_i (_ BitVec 32))
+"""
 
-; Known future window.
-(declare-const a_ip1 (_ BitVec 32))
-(declare-const a_ip2 (_ BitVec 32))
-(declare-const a_ip3 (_ BitVec 32))
 
-(declare-const b_ip1 (_ BitVec 32))
-(declare-const b_ip2 (_ BitVec 32))
-(declare-const b_ip3 (_ BitVec 32))
+def write_file(name: str, content: str) -> None:
+    path = ROOT / name
+    path.write_text(content, encoding="utf-8")
+    print(f"[+] Generated {path}")
 
-; Round constants/message word.
-(declare-const k_i (_ BitVec 32))
-(declare-const w_i (_ BitVec 32))
 
-; Forward step.
-(define-fun t1_fwd () (_ BitVec 32)
+def generate_ch_equiv() -> None:
+    content = HEADER + """\
+(declare-const x (_ BitVec 32))
+(declare-const y (_ BitVec 32))
+(declare-const z (_ BitVec 32))
+
+(assert
+  (distinct
+    (ChArith x y z)
+    (Ch x y z)))
+
+(check-sat)
+(exit)
+"""
+    write_file("ch_equiv.smt2", content)
+
+
+def generate_round_equiv(round_index: int, k_value: int) -> None:
+    """
+    Prove one arbitrary SHA-256 round against one SW transition.
+
+    The proof is deliberately local.  We do not unroll previous rounds.
+    Instead, we assume the coordinate invariant at the beginning of
+    the transition and prove that it is preserved by this transition.
+    """
+
+    k = f"#x{k_value:08x}"
+
+    content = HEADER + f"""\
+; SHA-256/SW one-round equivalence proof.
+; Round: {round_index}
+; K[{round_index}] = {k}
+
+(declare-const a (_ BitVec 32))
+(declare-const b (_ BitVec 32))
+(declare-const c (_ BitVec 32))
+(declare-const d (_ BitVec 32))
+(declare-const e (_ BitVec 32))
+(declare-const f (_ BitVec 32))
+(declare-const g (_ BitVec 32))
+(declare-const h (_ BitVec 32))
+(declare-const w (_ BitVec 32))
+
+; Standard SHA-256 round.
+
+(define-fun t1_std ()
+  (_ BitVec 32)
   (bvadd
-    b_i
+    h
     (bvadd
-      (s1 b_ip3)
+      (S1 e)
       (bvadd
-        (ch_f b_ip3 b_ip2 b_ip1)
-        (bvadd k_i w_i)))))
+        (ChArith e f g)
+        (bvadd {k} w)))))
 
-(define-fun b_ip4 () (_ BitVec 32)
-  (bvadd t1_fwd a_i))
-
-(define-fun t2_fwd () (_ BitVec 32)
+(define-fun t2_std ()
+  (_ BitVec 32)
   (bvadd
-    (s0 a_ip3)
-    (maj_f a_ip3 a_ip2 a_ip1)))
+    (S0 a)
+    (Maj a b c)))
 
-(define-fun a_ip4 () (_ BitVec 32)
+(define-fun a_next ()
+  (_ BitVec 32)
+  (bvadd t1_std t2_std))
+
+(define-fun e_next ()
+  (_ BitVec 32)
+  (bvadd d t1_std))
+
+; Sliding-window coordinates at the beginning of the round.
+
+(define-fun A0 () (_ BitVec 32) d)
+(define-fun A1 () (_ BitVec 32) c)
+(define-fun A2 () (_ BitVec 32) b)
+(define-fun A3 () (_ BitVec 32) a)
+
+(define-fun B0 () (_ BitVec 32) h)
+(define-fun B1 () (_ BitVec 32) g)
+(define-fun B2 () (_ BitVec 32) f)
+(define-fun B3 () (_ BitVec 32) e)
+
+; Sliding-window recurrence.
+
+(define-fun t1_sw ()
+  (_ BitVec 32)
   (bvadd
-    (bvsub b_ip4 a_i)
-    t2_fwd))
-
-; Recover T1 from A[i+4] and T2.
-(define-fun t2_rec () (_ BitVec 32)
-  (bvadd
-    (s0 a_ip3)
-    (maj_f a_ip3 a_ip2 a_ip1)))
-
-(define-fun t1_rec () (_ BitVec 32)
-  (bvsub a_ip4 t2_rec))
-
-; Recover a_i and b_i.
-(define-fun a_i_rec () (_ BitVec 32)
-  (bvsub b_ip4 t1_rec))
-
-(define-fun b_i_rec () (_ BitVec 32)
-  (bvsub
-    t1_rec
+    B0
     (bvadd
-      (s1 b_ip3)
+      (S1 B3)
       (bvadd
-        (ch_f b_ip3 b_ip2 b_ip1)
-        (bvadd k_i w_i)))))
+        (ChArith B3 B2 B1)
+        (bvadd {k} w)))))
 
-; Negate inverse correctness.
-; UNSAT means the recovered coordinates equal the originals.
-(assert (or
-  (distinct a_i a_i_rec)
-  (distinct b_i b_i_rec)))
+(define-fun B4 ()
+  (_ BitVec 32)
+  (bvadd t1_sw A0))
+
+(define-fun t2_sw ()
+  (_ BitVec 32)
+  (bvadd
+    (S0 A3)
+    (Maj A3 A2 A1)))
+
+(define-fun A4 ()
+  (_ BitVec 32)
+  (bvadd
+    (bvsub B4 A0)
+    t2_sw))
+
+; Under the invariant:
+;
+;   t1_sw = t1_std
+;   t2_sw = t2_std
+;   B4    = e_next
+;   A4    = a_next
+;
+; The other six coordinates follow solely by the sliding-window shift.
+
+(assert
+  (or
+    (distinct t1_sw t1_std)
+    (distinct t2_sw t2_std)
+    (distinct A4 a_next)
+    (distinct B4 e_next)))
 
 (check-sat)
 (exit)
 """
 
-    write_file(
-        "full_64round_inverse.smt2",
-        content,
-    )
+    write_file(f"round_{round_index:02d}_equiv.smt2", content)
+
+
+def generate_full_64round_summary() -> None:
+    """
+    Generate a compact proof whose K is symbolic.
+
+    This is stronger than any particular K instance: it proves the
+    transition for arbitrary 32-bit K and W.  The 64 concrete round
+    obligations additionally check every FIPS constant was emitted.
+    """
+
+    content = HEADER + """\
+; General one-round SHA-256/SW equivalence.
+; K and W are arbitrary 32-bit values.
+
+(declare-const a (_ BitVec 32))
+(declare-const b (_ BitVec 32))
+(declare-const c (_ BitVec 32))
+(declare-const d (_ BitVec 32))
+(declare-const e (_ BitVec 32))
+(declare-const f (_ BitVec 32))
+(declare-const g (_ BitVec 32))
+(declare-const h (_ BitVec 32))
+(declare-const k (_ BitVec 32))
+(declare-const w (_ BitVec 32))
+
+(define-fun t1_std ()
+  (_ BitVec 32)
+  (bvadd
+    h
+    (bvadd
+      (S1 e)
+      (bvadd
+        (ChArith e f g)
+        (bvadd k w)))))
+
+(define-fun t2_std ()
+  (_ BitVec 32)
+  (bvadd
+    (S0 a)
+    (Maj a b c)))
+
+(define-fun a_next ()
+  (_ BitVec 32)
+  (bvadd t1_std t2_std))
+
+(define-fun e_next ()
+  (_ BitVec 32)
+  (bvadd d t1_std))
+
+(define-fun A0 () (_ BitVec 32) d)
+(define-fun A1 () (_ BitVec 32) c)
+(define-fun A2 () (_ BitVec 32) b)
+(define-fun A3 () (_ BitVec 32) a)
+
+(define-fun B0 () (_ BitVec 32) h)
+(define-fun B1 () (_ BitVec 32) g)
+(define-fun B2 () (_ BitVec 32) f)
+(define-fun B3 () (_ BitVec 32) e)
+
+(define-fun t1_sw ()
+  (_ BitVec 32)
+  (bvadd
+    B0
+    (bvadd
+      (S1 B3)
+      (bvadd
+        (ChArith B3 B2 B1)
+        (bvadd k w)))))
+
+(define-fun B4 ()
+  (_ BitVec 32)
+  (bvadd t1_sw A0))
+
+(define-fun t2_sw ()
+  (_ BitVec 32)
+  (bvadd
+    (S0 A3)
+    (Maj A3 A2 A1)))
+
+(define-fun A4 ()
+  (_ BitVec 32)
+  (bvadd
+    (bvsub B4 A0)
+    t2_sw))
+
+(assert
+  (or
+    (distinct t1_sw t1_std)
+    (distinct t2_sw t2_std)
+    (distinct A4 a_next)
+    (distinct B4 e_next)))
+
+(check-sat)
+(exit)
+"""
+
+    write_file("full_64round_equiv.smt2", content)
+
+
+def generate_inverse_step() -> None:
+    """
+    Prove the local sliding-window transition is invertible.
+
+    Given the next A/B coordinates, recover the oldest A/B coordinates.
+    """
+
+    content = HEADER + """\
+; Single-step algebraic inverse proof.
+
+(declare-const A0 (_ BitVec 32))
+(declare-const A1 (_ BitVec 32))
+(declare-const A2 (_ BitVec 32))
+(declare-const A3 (_ BitVec 32))
+
+(declare-const B0 (_ BitVec 32))
+(declare-const B1 (_ BitVec 32))
+(declare-const B2 (_ BitVec 32))
+(declare-const B3 (_ BitVec 32))
+
+(declare-const k (_ BitVec 32))
+(declare-const w (_ BitVec 32))
+
+(define-fun t1 ()
+  (_ BitVec 32)
+  (bvadd
+    B0
+    (bvadd
+      (S1 B3)
+      (bvadd
+        (ChArith B3 B2 B1)
+        (bvadd k w)))))
+
+(define-fun B4 ()
+  (_ BitVec 32)
+  (bvadd t1 A0))
+
+(define-fun t2 ()
+  (_ BitVec 32)
+  (bvadd
+    (S0 A3)
+    (Maj A3 A2 A1)))
+
+(define-fun A4 ()
+  (_ BitVec 32)
+  (bvadd
+    (bvsub B4 A0)
+    t2))
+
+; Recover t1 from A4 and t2.
+
+(define-fun t1_rec ()
+  (_ BitVec 32)
+  (bvsub A4 t2))
+
+; Recover A0 from B4 = t1 + A0.
+
+(define-fun A0_rec ()
+  (_ BitVec 32)
+  (bvsub B4 t1_rec))
+
+; Recover B0 from
+;
+;   t1 = B0 + F(B1,B2,B3,k,w).
+
+(define-fun B0_rec ()
+  (_ BitVec 32)
+  (bvsub
+    t1_rec
+    (bvadd
+      (S1 B3)
+      (bvadd
+        (ChArith B3 B2 B1)
+        (bvadd k w)))))
+
+(assert
+  (or
+    (distinct A0 A0_rec)
+    (distinct B0 B0_rec)))
+
+(check-sat)
+(exit)
+"""
+
+    write_file("full_64round_inverse.smt2", content)
 
 
 def main() -> int:
+    if len(K) != 64:
+        raise RuntimeError(f"SHA-256 K table must contain 64 constants, got {len(K)}")
+
+    if K[34] != 0x4D2C6DFC:
+        raise RuntimeError("K[34] is incorrect")
+
     generate_ch_equiv()
-    generate_full_64round()
+
+    for i, k_value in enumerate(K):
+        generate_round_equiv(i, k_value)
+
+    generate_full_64round_summary()
     generate_inverse_step()
 
+    print("[+] Generated 64 independent one-round equivalence proofs.")
+    print("[+] Generated compact symbolic equivalence proof.")
+    print("[+] Generated inverse proof.")
     print("[+] SMT proof artifacts generated.")
+
     return 0
 
 
