@@ -10,14 +10,14 @@ The project has two distinct goals:
 2. Measure whether the sliding-window representation changes SAT/SMT solver
    performance on reduced-round, reduced-width benchmark problems.
 
-> **Central result:** For every fixed 64-word SHA-256 round schedule
-> `W = (W[0], ..., W[63])`, the 64-round working-state transformation
-> `E_W` is a permutation of the 256-bit state space. The sliding-window
-> representation provides an explicit inverse `E_W^-1`.
-
-This gives deterministic freestart fixed points for a known message schedule.
-It does **not** provide an inversion, collision, or preimage attack against
-standard SHA-256 with its fixed FIPS IV and unknown message.
+> **Central result:** For every fixed 64-word SHA-256 round schedule `W`, the
+> 64-round working-state transformation `E_W` is a permutation of the 256-bit
+> state space. The sliding-window representation provides an explicit inverse
+> `E_W⁻¹`.
+>
+> This gives deterministic freestart fixed points for a known message schedule.
+> It does **not** provide an inversion, collision, or preimage attack against
+> standard SHA-256 with its fixed FIPS IV and unknown message.
 
 The project therefore studies a representation and solver question, not a
 claimed break of SHA-256.
@@ -38,7 +38,7 @@ Known message schedule W
 E_W is a permutation
         │
         ▼
-Exact state inverse E_W^-1
+Exact state inverse E_W⁻¹
 ```
 
 versus:
@@ -61,7 +61,7 @@ Message-search problem
 
 SHA256SW directly establishes the first result.
 
-It does not provide an efficient solution to the second problem.
+It does **not** provide an efficient solution to the second problem.
 
 In particular, the project does not claim:
 
@@ -73,8 +73,8 @@ In particular, the project does not claim:
 - a reduction in generic preimage complexity;
 - an efficient inversion of SHA-256 with respect to its unknown message.
 
-For an expanded security discussion, see
-[`SECURITY_SCOPE.md`](SECURITY_SCOPE.md).
+See [`SECURITY_SCOPE.md`](SECURITY_SCOPE.md) for the expanded security
+discussion.
 
 ---
 
@@ -86,7 +86,7 @@ SHA-256 maintains eight 32-bit working words:
 A B C D E F G H
 ```
 
-For round `i`, define:
+For round `i`:
 
 ```text
 T1 = H
@@ -115,7 +115,7 @@ G' = F
 H' = G
 ```
 
-### Sliding-Window Coordinates
+### Sliding-window coordinates
 
 For round `i`, define:
 
@@ -151,9 +151,11 @@ a[i+4] = T1 + T2
 The sliding-window representation does not change SHA-256. It changes the
 coordinates used to represent the same state transition.
 
-### Exact One-Round Inverse
+---
 
-Given:
+## Exact One-Round Inverse
+
+Given the output state:
 
 ```text
 (A', B', C', D', E', F', G', H')
@@ -174,15 +176,19 @@ G = H'
 Then:
 
 ```text
-T2 = Σ0(A) + Maj(A, B, C)
+T2 = Σ0(A) + Maj(A,B,C)
 
 T1 = A' - T2
 
 D = E' - T1
+```
 
+Finally:
+
+```text
 H = T1
   - Σ1(E)
-  - Ch(E, F, G)
+  - Ch(E,F,G)
   - K[i]
   - W[i]
 ```
@@ -194,7 +200,7 @@ Thus every fixed-word SHA-256 round is invertible.
 For a fixed schedule:
 
 ```text
-W = (W[0], ..., W[63])
+W = (W[0], W[1], ..., W[63])
 ```
 
 the complete transformation is:
@@ -208,7 +214,7 @@ and is therefore a permutation of the 256-bit working-state space.
 The inverse is obtained by applying the inverse rounds in reverse order:
 
 ```text
-B_W = E_W^-1
+B_W = E_W⁻¹
 ```
 
 For `R` rounds, the inverse requires:
@@ -225,8 +231,7 @@ For full SHA-256:
 R = 64
 ```
 
-For the complete algebraic derivation, see
-[`THEORY.md`](THEORY.md).
+See [`THEORY.md`](THEORY.md) for the complete algebraic derivation.
 
 ---
 
@@ -256,7 +261,7 @@ E_W(H) = 0^256
 Because `E_W` is a permutation, there is exactly one such working state:
 
 ```text
-H_fix = E_W^-1(0^256)
+H_fix = E_W⁻¹(0^256)
 ```
 
 Therefore:
@@ -273,10 +278,7 @@ C_W(H_fix) = H_fix
 
 This is a freestart/chaining-state construction for a known schedule.
 
-It is not a standard-IV SHA-256 fixed point.
-
-For the full distinction between freestart state inversion and unknown-message
-inversion, see [`SECURITY_SCOPE.md`](SECURITY_SCOPE.md).
+It is **not** a standard-IV SHA-256 fixed point.
 
 ---
 
@@ -320,9 +322,9 @@ SHA256SW addresses the first problem.
 The Boolean functions are:
 
 ```text
-Ch(x, y, z)  = (x & y) ^ (~x & z)
+Ch(x,y,z)  = (x & y) ^ (~x & z)
 
-Maj(x, y, z) = (x & y) ^ (x & z) ^ (y & z)
+Maj(x,y,z) = (x & y) ^ (x & z) ^ (y & z)
 ```
 
 The large-sigma functions are:
@@ -404,7 +406,7 @@ changes solver behavior.
 The repository contains formal bit-vector verification infrastructure under
 [`formal/`](formal/).
 
-The formal models cover the relationships between:
+The formal models cover relationships between:
 
 - the standard representation;
 - the sliding-window representation;
@@ -430,9 +432,8 @@ Formal SMT model
 Machine-checked encoding
 ```
 
-The formal models are therefore validation of the encoded construction, while
-the explicit algebraic inverse supplies the mathematical justification for
-bijectivity.
+The formal models validate the encoded construction, while the explicit
+algebraic inverse supplies the mathematical justification for bijectivity.
 
 Run:
 
@@ -444,10 +445,10 @@ make formal
 
 ## Implementation
 
-The implementation is portable C11 and is intended for research, verification,
-and benchmarking.
+The implementation is portable C11 and is intended for research,
+verification, and benchmarking.
 
-The implementation provides:
+It provides:
 
 - SHA-256 initialization;
 - incremental update;
@@ -501,24 +502,24 @@ A typical validation hierarchy is:
 
 ```text
 C unit tests
-      │
-      ▼
-reference SHA-256 behavior
-      │
-      ▼
-standard/SW equivalence
-      │
-      ▼
-formal verification
-      │
-      ▼
-round-inverse validation
-      │
-      ▼
-solver benchmark
+     │
+     ▼
+Reference SHA-256 behavior
+     │
+     ▼
+Standard/SW equivalence
+     │
+     ▼
+Formal verification
+     │
+     ▼
+Round-inverse validation
+     │
+     ▼
+Solver benchmark
 ```
 
-Correctness is established before solver performance is interpreted.
+Correctness should be established before solver performance is interpreted.
 
 ---
 
@@ -538,17 +539,21 @@ Sliding-window encoding
 
 on reduced-round problems.
 
-The benchmark supports representation-equivalence experiments and
-reduced-round collision experiments.
+The benchmark supports:
 
-### Primary Solver Metric
+- representation-equivalence experiments;
+- reduced-round collision experiments;
+- reduced-width experiments;
+- independent witness verification.
 
-The primary solver metric is:
+### Primary solver metric
+
+The primary metric is:
 
 ```text
 S_R =
 median(T_Std-Explicit,R)
--------------------------
+------------------------
 median(T_SW-Explicit,R)
 ```
 
@@ -564,7 +569,7 @@ S_R < 1    Standard representation is faster
 
 This is a solver-performance metric, not a cryptographic-security metric.
 
-A measured value such as:
+For example:
 
 ```text
 S_R = 3
@@ -573,7 +578,7 @@ S_R = 3
 means that, under the specified benchmark conditions, the SW encoding had
 approximately one-third the median runtime of the standard encoding.
 
-It does not mean that SHA-256 is three times weaker.
+It does **not** mean that SHA-256 is three times weaker.
 
 ---
 
@@ -582,7 +587,8 @@ It does not mean that SHA-256 is three times weaker.
 The repository provides infrastructure for measuring representation-level
 solver performance.
 
-A benchmark harness existing does not by itself establish a solver speedup.
+The existence of a benchmark harness does not by itself establish a solver
+speedup.
 
 Performance claims should be based on recorded experiments including:
 
@@ -601,10 +607,8 @@ Performance claims should be based on recorded experiments including:
 - median runtime;
 - runtime dispersion.
 
-The benchmark documentation defines the recommended methodology and reporting
-conventions.
-
-See [`BENCHMARKING.md`](BENCHMARKING.md).
+See [`BENCHMARKING.md`](BENCHMARKING.md) for the recommended methodology and
+reporting conventions.
 
 ---
 
@@ -619,16 +623,16 @@ M1 != M2
 such that:
 
 ```text
-H_R(IV, M1) = H_R(IV, M2)
+H_R(IV,M1) = H_R(IV,M2)
 ```
 
 for a reduced number of rounds `R`.
 
 These experiments are benchmark controls and solver workloads.
 
-They are not attacks on full 64-round SHA-256.
+They are **not attacks on full 64-round SHA-256**.
 
-### Reduced-Width Experiments
+### Reduced-width experiments
 
 The benchmark can use parameterized word widths such as:
 
@@ -653,7 +657,7 @@ should not be interpreted as reduced security estimates for SHA-256.
 
 The benchmark should be understood through several controls.
 
-### Known Small Collision
+### Known small collision
 
 A small-width collision can provide a deterministic positive control.
 
@@ -703,15 +707,11 @@ M1 != M2
 and:
 
 ```text
-H_9(IV4, M1)
+H_9(IV4,M1)
 =
 [0x1, 0xa, 0x6, 0x3, 0xa, 0xe, 0xf, 0x2]
-```
 
-and:
-
-```text
-H_9(IV4, M2)
+H_9(IV4,M2)
 =
 [0x1, 0xa, 0x6, 0x3, 0xa, 0xe, 0xf, 0x2]
 ```
@@ -719,9 +719,9 @@ H_9(IV4, M2)
 This is an ordinary finite-domain collision in a parameterized reduced-width
 model.
 
-It is not a collision for full SHA-256.
+It is **not** a collision for full SHA-256.
 
-### Inactive-Word Control
+### Inactive-word control
 
 For:
 
@@ -743,8 +743,8 @@ W[15]
 
 must therefore leave the 15-round working-state output unchanged.
 
-This provides a useful boundary test for benchmark implementations and message
-word accounting.
+This provides a useful boundary test for benchmark implementations and
+message-word accounting.
 
 ---
 
@@ -770,8 +770,8 @@ is preferable to treating every timeout as exactly:
 120 s
 ```
 
-The complete timeout and reporting methodology is documented in
-[`BENCHMARKING.md`](BENCHMARKING.md).
+See [`BENCHMARKING.md`](BENCHMARKING.md) for the complete timeout and
+reporting methodology.
 
 ---
 
@@ -827,34 +827,34 @@ representation-level solver comparison.
 Start with correctness and formal validation before running difficult solver
 instances.
 
-### 1. Build and Run Tests
+### 1. Build and run tests
 
 ```bash
 make test
 ```
 
-### 2. Run Formal Verification
+### 2. Run formal verification
 
 ```bash
 make formal
 ```
 
-### 3. Run the Project Gate
+### 3. Run the project gate
 
 ```bash
 make gate
 ```
 
-### 4. Run Representation Equivalence Checks
+### 4. Run representation equivalence checks
 
 ```bash
 make equiv
 ```
 
-### 5. Run the Benchmark
+### 5. Run the benchmark
 
-For the benchmark methodology, controls, width/round ladder, timeout handling,
-and reproducibility requirements, see
+For the benchmark methodology, controls, width/round ladder, timeout
+handling, and reproducibility requirements, see
 [`BENCHMARKING.md`](BENCHMARKING.md).
 
 The benchmark should be started with small, known-good controls before
@@ -896,128 +896,49 @@ sha256sw/
 ├── BENCHMARKING.md
 ├── LICENSE
 ├── Makefile
+├── README.md
 ├── SECURITY_SCOPE.md
-├── THEORY.md
-└── README.md
+└── THEORY.md
 ```
 
-The main components are:
-
-```text
-src/        C implementation
-include/    public headers
-tests/      correctness and regression tests
-formal/     SMT/formal verification infrastructure
-benchmark/  SAT/SMT benchmark harness
-```
+The repository contains the C implementation, tests, formal-model generation,
+benchmark harness, theory documentation, security-scope documentation, and
+benchmarking methodology.
 
 ---
 
-## Make Targets
+## Verification Hierarchy
 
-The Makefile provides targets for common development and verification tasks,
-including:
+The recommended verification workflow is:
 
 ```text
-make test
-make formal
-make gate
-make equiv
-make benchmark
-make verify
-make ci
-make help
+1. C unit tests
+       │
+       ▼
+2. Independent/reference behavior
+       │
+       ▼
+3. Standard/SW equivalence
+       │
+       ▼
+4. Algebraic round-inverse derivation
+       │
+       ▼
+5. Randomized round-trip validation
+       │
+       ▼
+6. Reduced-round solver benchmarks
 ```
 
-Use:
-
-```bash
-make help
-```
-
-for the current target list.
+Correctness should be established before performance is measured.
 
 ---
 
-## Reproducibility
+## Algebraic Proof vs Empirical Validation
 
-Benchmark results should always be tied to:
+The distinction between proof and experiment is important.
 
-```text
-repository commit
-solver version
-hardware
-operating system
-round count
-word size
-trial count
-timeout
-```
-
-At minimum:
-
-```bash
-git rev-parse HEAD
-```
-
-should be recorded alongside the benchmark command.
-
-A reproducible result should therefore look conceptually like:
-
-```text
-Commit:        <git revision>
-Solver:        <solver and version>
-CPU:           <CPU model>
-OS:            <operating system>
-Rounds:        <R>
-Width:         <n>
-Trials:        <N>
-Timeout:       <seconds>
-```
-
-This prevents benchmark numbers from being detached from the environment in
-which they were obtained.
-
----
-
-## Scientific Interpretation
-
-There are three useful possible outcomes.
-
-### `S_R > 1`
-
-The sliding-window encoding is faster under the tested conditions.
-
-This supports the hypothesis that eliminating explicit register-copy
-constraints can improve solver performance.
-
-### `S_R ~= 1`
-
-The representations perform similarly.
-
-This suggests that preprocessing or other solver mechanisms may already
-eliminate much of the apparent representation difference.
-
-### `S_R < 1`
-
-The conventional explicit-register representation is faster.
-
-This demonstrates that the explicit representation can sometimes provide a
-more favorable constraint structure.
-
-All three outcomes are scientifically useful.
-
----
-
-## What the Project Establishes
-
-For a fixed sequence:
-
-```text
-W[0], ..., W[63]
-```
-
-the project establishes the following mathematical property:
+The following is an algebraic result:
 
 ```text
 Each fixed-word SHA-256 round is invertible.
@@ -1026,124 +947,187 @@ Each fixed-word SHA-256 round is invertible.
 Therefore:
 
 ```text
-The composition of the 64 rounds is invertible.
+The composition of fixed-word rounds is invertible.
 ```
 
-Thus:
+The following are empirical validations:
 
 ```text
-E_W : {0,1}^256 -> {0,1}^256
-```
-
-is a permutation.
-
-The inverse is:
-
-```text
-B_W = E_W^-1
-```
-
-and satisfies:
-
-```text
-B_W(E_W(H)) = H
+Randomized forward/backward round trips pass.
 ```
 
 and:
 
 ```text
-E_W(B_W(S)) = S
+Standard and SW implementations agree on tested instances.
 ```
 
-for every valid working state `H` and target state `S`.
-
-Setting:
-
-```text
-S = 0^256
-```
-
-gives the unique fixed-schedule freestart state:
-
-```text
-H_fix = B_W(0^256)
-```
-
-with:
-
-```text
-E_W(H_fix) = 0^256
-```
-
-and therefore:
-
-```text
-C_W(H_fix) = H_fix
-```
-
-This is the project's principal mathematical result.
+Experiments provide evidence that the implementation corresponds to the
+mathematical construction, but randomized testing is not itself the proof of
+bijectivity.
 
 ---
 
-## What the Project Does Not Establish
+## Formal Equivalence vs Algebraic Bijection
 
-The fixed-schedule permutation property does not imply that standard SHA-256
-is efficiently invertible as a function of its message.
+These are related but distinct properties.
 
-It does not establish:
+### Equivalence
 
-- a full-round collision attack;
-- a full-round preimage attack;
-- a second-preimage attack;
-- a standard-IV fixed point;
-- a practical message inversion method;
-- a reduction in generic collision complexity;
-- a reduction in generic preimage complexity.
+The standard and sliding-window models compute the same state transition.
 
-The usual generic security scales are approximately:
+### Bijection
+
+For a fixed schedule, that transition has a unique inverse with respect to
+the working-state input.
+
+The project therefore establishes two complementary facts:
 
 ```text
-Collision search: 2^128
-Preimage search:  2^256
+Standard model == SW model
 ```
 
-for an ideal 256-bit hash.
+and:
 
-These are generic security scales, not claims that every concrete attack must
-require exactly those numbers.
+```text
+Fixed-schedule state transformation is bijective
+```
 
-SHA256SW does not claim to reduce them.
+The first validates the representation.
 
-For the complete security boundary, see
-[`SECURITY_SCOPE.md`](SECURITY_SCOPE.md).
+The second establishes the state-inversion property.
 
 ---
 
-## Length Extension and Internal Fixed Points
+## Freestart Fixed-Point Construction
 
-The freestart fixed-point construction is separate from the conventional
-Merkle-Damgård length-extension property of SHA-256.
+For a chosen message block `M`:
 
-Length extension concerns continued processing from a known chaining state
-with valid additional blocks.
+```text
+1. Expand M into W[0..63].
+2. Choose target S = 0^256.
+3. Apply B_W to S.
+4. Obtain H_fix.
+5. Verify E_W(H_fix) = 0^256.
+6. Verify C_W(H_fix) = H_fix.
+```
 
-The freestart construction instead selects a compatible chaining state for a
-known fixed schedule.
+Conceptually:
 
-The sliding-window inverse addresses the latter state-inversion problem.
+```text
+M
+│
+▼
+W[0..63]
+│
+▼
+B_W(0^256)
+│
+▼
+H_fix
+│
+├───────────────┐
+│               │
+▼               ▼
+E_W(H_fix)      C_W(H_fix)
+│               │
+▼               ▼
+0^256           H_fix
+```
 
-It does not remove or create the standard length-extension property.
+The construction is deterministic once `M` is fixed.
+
+---
+
+## Repeated Freestart Blocks
+
+If a construction allows the chaining state to be selected as:
+
+```text
+H_fix
+```
+
+and the corresponding message block is:
+
+```text
+M
+```
+
+then:
+
+```text
+C_M(H_fix) = H_fix
+```
+
+and consequently:
+
+```text
+H_fix --M--> H_fix --M--> H_fix --M--> ...
+```
+
+This is an internal chaining-state loop.
+
+It is a property of a **freestart or chosen-IV setting**.
+
+It is not a collision for standard SHA-256 at its fixed FIPS IV.
+
+---
+
+## Standard Hashing and Padding
+
+The internal compression transformation should not be confused with the
+complete SHA-256 hash function.
+
+Standard SHA-256 applies Merkle-Damgård-style processing with padding and an
+encoded message length.
+
+Therefore an internal fixed point does not automatically imply that arbitrary
+serialized messages of different lengths have the same final SHA-256 digest.
+
+The fixed-point result concerns the selected compression-state transition.
+
+---
+
+## Length-Extension Context
+
+SHA-256, as a Merkle-Damgård hash, has the conventional length-extension
+property when a raw hash is incorrectly used as a MAC.
+
+That property is separate from the freestart fixed-point construction.
+
+The distinction is:
+
+```text
+Length extension
+    =
+known chaining state + additional valid blocks
+```
+
+whereas:
+
+```text
+Freestart fixed point
+    =
+choose a message block and construct a compatible chaining state
+```
+
+The sliding-window inverse addresses the latter fixed-schedule state problem.
+
+It does not remove or create the standard Merkle-Damgård length-extension
+property.
 
 ---
 
 ## Differential-Cryptanalysis Context
 
-The sliding-window representation can be useful for reduced-round differential
-or solver models because repeated state shifts are represented implicitly.
+The sliding-window representation can also be useful when constructing
+reduced-round differential models because the state shifts are represented
+implicitly.
 
-It does not, however, eliminate the underlying difficulty of SHA-256.
+However, the representation does not remove the fundamental difficulty of
+SHA-256 differential analysis.
 
-In particular, modular addition is not linear with respect to XOR differences:
+In particular, modular addition is not linear with respect to XOR difference:
 
 ```text
 Δ⊕(x + y) != Δ⊕x + Δ⊕y
@@ -1151,7 +1135,9 @@ In particular, modular addition is not linear with respect to XOR differences:
 
 in general.
 
-Carry propagation and the Boolean/ARX operations remain.
+Carries can propagate through multiple bit positions, and the Boolean and
+ARX operations continue to impose the same constraints as in the conventional
+representation.
 
 Therefore:
 
@@ -1171,40 +1157,156 @@ Elimination of ARX difficulty
 
 ---
 
-## Limitations
+## What the Sliding Window Removes
 
-### Reduced Rounds
+The SW formulation removes the need to represent the six direct register
+copies explicitly at every round:
 
-Reduced-round results cannot be extrapolated directly to full 64-round
-SHA-256 security.
+```text
+B' = A
+C' = B
+D' = C
 
-### Reduced Widths
+F' = E
+G' = F
+H' = G
+```
 
-Experiments with `n < 32` are parameterized ARX models, not real 32-bit
-SHA-256 instances.
+These relationships are encoded by the overlapping windows.
 
-### Fixed Schedules
+This can change the constraint graph presented to a SAT/SMT solver.
 
-The state inverse assumes that the complete round schedule is already known.
+---
 
-### Solver Dependence
+## What the Sliding Window Does Not Remove
 
-A representation that helps one solver may not help another.
+The SW formulation does not remove:
 
-### Hardware Dependence
+- modular addition;
+- addition carries;
+- `Ch`;
+- `Maj`;
+- rotations;
+- logical shifts;
+- SHA-256 sigma functions;
+- SHA-256 message-schedule expansion;
+- the 64-round computation;
+- the 512-bit message block;
+- the underlying ARX/Boolean structure.
 
-Wall-clock measurements depend on hardware, operating system, solver version,
-and system load.
+The benchmark therefore isolates a representation-level question rather than
+changing the cryptographic algorithm.
 
-### Statistical Limitations
+---
 
-Small trial counts can produce unstable runtime estimates.
+## Security Boundary
 
-### Benchmark Difficulty
+The central security distinction is:
 
-Hard reduced-round collision instances may legitimately time out. A timeout
-should be interpreted as a benchmark outcome, not automatically as evidence of
-an implementation failure.
+```text
+Known W
+  │
+  ▼
+Invert E_W with respect to H
+  │
+  ▼
+Deterministic state inversion
+```
+
+versus:
+
+```text
+Fixed IV
+  │
+  ▼
+Unknown M
+  │
+  ▼
+Unknown W(M)
+  │
+  ▼
+Message-search problem
+```
+
+The sliding-window inverse operates only in the first regime.
+
+It does not provide an efficient inversion algorithm for the second.
+
+See [`SECURITY_SCOPE.md`](SECURITY_SCOPE.md) for the complete discussion.
+
+---
+
+## Collision and Preimage Complexity
+
+For an ideal 256-bit hash, conventional generic security scales are often
+described approximately as:
+
+```text
+Collision search: 2^128
+Preimage search:  2^256
+```
+
+These are generic security scales, not theorems that every concrete attack
+must require exactly those numbers.
+
+SHA256SW does not provide an attack that reduces either generic scale for
+standard SHA-256.
+
+The fixed-schedule state inverse is a different problem because the message
+schedule is already supplied.
+
+---
+
+## Security Claims
+
+### Established by the construction
+
+For a fixed sequence `W[0..63]`:
+
+- each SHA-256 round is invertible;
+- the 64-round working-state transformation is a permutation;
+- every target working state has a unique state preimage;
+- the sliding-window backward operator is the exact inverse;
+- the Davies-Meyer freestart fixed point exists and is unique.
+
+### Not established by this project
+
+The project does not establish:
+
+- a full-round SHA-256 collision attack;
+- a full-round SHA-256 preimage attack;
+- a second-preimage attack;
+- a standard-IV fixed point;
+- a reduction in generic collision complexity;
+- a reduction in generic preimage complexity.
+
+---
+
+## Benchmark Methodology
+
+A meaningful solver comparison should record:
+
+- solver name;
+- exact solver version;
+- CPU model;
+- available cores;
+- RAM;
+- operating system;
+- compiler/runtime versions;
+- repository commit;
+- round count;
+- word size;
+- number of trials;
+- per-instance timeout;
+- solved count;
+- timeout count;
+- median runtime;
+- runtime dispersion.
+
+Timeouts are right-censored observations and should be reported explicitly.
+
+See [`BENCHMARKING.md`](BENCHMARKING.md) for the full methodology, controls,
+benchmark ladder, and reproducibility requirements.
 
 ---
 
@@ -1228,57 +1330,230 @@ Potential follow-up experiments include:
 - larger reduced-round widths;
 - hardware implementation comparisons.
 
-The central empirical question remains:
-
-```text
-Does the sliding-window encoding
-produce a reproducible SAT/SMT advantage?
-```
-
-That question must be answered experimentally rather than inferred from the
-existence of the alternative representation.
+The most important empirical question is whether the reduction in explicit
+register-copy constraints produces a reproducible solver advantage.
 
 ---
 
-## Documentation
+## Limitations
 
-The project separates the detailed mathematical and experimental material
-from this README.
+The project has several important limitations.
 
-### [`THEORY.md`](THEORY.md)
+### Reduced rounds
 
-Mathematical derivations covering:
+Reduced-round results cannot be extrapolated directly to full 64-round
+SHA-256 security.
 
-- SHA-256 state coordinates;
-- sliding-window formulation;
-- one-round inversion;
-- full fixed-schedule bijection;
-- inverse composition;
-- freestart fixed points;
-- complexity and algebraic interpretation.
+### Reduced widths
 
-### [`SECURITY_SCOPE.md`](SECURITY_SCOPE.md)
+Experiments with `n < 32` are parameterized ARX models and are not equivalent
+to real 32-bit SHA-256.
 
-Security boundaries covering:
+### Fixed schedules
 
-- fixed-schedule state inversion;
-- standard-IV message inversion;
-- freestart versus standard hashing;
-- collision/preimage interpretation;
-- reduced-width and reduced-round limitations;
-- claims that are and are not supported by the project.
+The state inverse assumes that the complete schedule is known.
 
-### [`BENCHMARKING.md`](BENCHMARKING.md)
+### Solver dependence
 
-Benchmark methodology covering:
+A representation that helps one solver may not help another.
 
-- solver configurations;
-- width/round ladders;
-- controls;
-- timeout handling;
-- statistical reporting;
-- reproducibility;
-- interpretation of `S_R`.
+### Hardware dependence
+
+Wall-clock measurements depend on hardware, operating system, solver
+version, and system load.
+
+### Statistical limitations
+
+Small trial counts can produce unstable runtime estimates.
+
+---
+
+## Publication-Ready Mathematical Statement
+
+> For every fixed sequence of 64 SHA-256 round words, the 64-round SHA-256
+> working-state transformation is a permutation of the 256-bit state space.
+> Each individual round is invertible by algebraically recovering the six
+> shifted registers followed by `T1`, `T2`, and the remaining input registers.
+> The sliding-window representation provides an explicit coordinate form of
+> this inverse. Consequently, for any target working state `S`, the unique
+> chaining state `H = E_W⁻¹(S)` can be computed in `O(R)` round operations,
+> where `R = 64` for full SHA-256. In particular, every fixed message schedule
+> has a unique Davies-Meyer freestart fixed point corresponding to target
+> state `0^256`. This is inversion with respect to the chaining state under a
+> known schedule and does not constitute efficient inversion with respect to
+> the unknown message input at the standardized SHA-256 IV.
+
+---
+
+## Final Mathematical Summary
+
+For fixed:
+
+```text
+W = (W[0], ..., W[63])
+```
+
+each round is invertible:
+
+```text
+R_i⁻¹ exists
+```
+
+therefore:
+
+```text
+E_W = R_63 ∘ ... ∘ R_0
+```
+
+is invertible.
+
+The sliding-window backward operator is:
+
+```text
+B_W = E_W⁻¹
+```
+
+and therefore:
+
+```text
+B_W(E_W(H)) = H
+```
+
+and:
+
+```text
+E_W(B_W(S)) = S
+```
+
+for all valid working states `H` and target states `S`.
+
+Setting:
+
+```text
+S = 0^256
+```
+
+gives:
+
+```text
+H_fix = B_W(0^256)
+```
+
+and therefore:
+
+```text
+E_W(H_fix) = 0^256
+```
+
+so the Davies-Meyer compression satisfies:
+
+```text
+C_W(H_fix) = H_fix
+```
+
+under the corresponding fixed message schedule.
+
+The essential boundary is:
+
+```text
++------------------------------------------------------+
+| FIXED MESSAGE SCHEDULE                               |
+|                                                      |
+| W known                                              |
+|      ↓                                               |
+| E_W is a permutation                                 |
+|      ↓                                               |
+| E_W⁻¹ is explicit                                    |
+|      ↓                                               |
+| State inversion is deterministic in O(R) operations |
++------------------------------------------------------+
+```
+
+versus:
+
+```text
++------------------------------------------------------+
+| STANDARD SHA-256 MESSAGE SEARCH                      |
+|                                                      |
+| IV fixed                                             |
+|      ↓                                               |
+| M unknown                                            |
+|      ↓                                               |
+| W(M) unknown/constrained                             |
+|      ↓                                               |
+| Message search remains the hard problem             |
++------------------------------------------------------+
+```
+
+---
+
+## Bottom Line
+
+The project establishes a clean separation between representation and
+cryptographic security:
+
+```text
+                         SHA-256
+
+             ┌─────────────────────────┐
+             │ Same mathematical       │
+             │ state transition        │
+             └────────────┬────────────┘
+                          │
+                ┌─────────┴─────────┐
+                │                   │
+                ▼                   ▼
+        Standard model       Sliding window
+                │                   │
+                └─────────┬─────────┘
+                          │
+                          ▼
+                  Exact equivalence
+                          │
+                          ▼
+                   Fixed W is
+                    invertible
+                          │
+                          ▼
+                   Exact state
+                     inverse
+                          │
+                          ▼
+                Freestart fixed point
+```
+
+The crucial cryptographic boundary remains:
+
+```text
+Fixed W  ->  invert the state
+```
+
+is not the same problem as:
+
+```text
+Fixed IV + unknown M  ->  invert the message
+```
+
+Therefore the sliding-window inverse is a structural and algebraic property
+of the fixed-schedule SHA-256 working-state transformation, not a break of
+standard SHA-256.
+
+The remaining experimental question is empirical:
+
+```text
+Does the sliding-window encoding
+produce a measurable SAT/SMT advantage?
+```
+
+That is what the benchmark harness is designed to measure.
+
+---
+
+## License
+
+This project is released under the MIT License.
+
+See [`LICENSE`](LICENSE) for the complete license text.
 
 ---
 
@@ -1296,84 +1571,21 @@ Benchmark methodology covering:
 
 ---
 
-## License
+## Related Documentation
 
-This project is released under the MIT License.
-
-See:
-
-```text
-LICENSE
-```
-
-for the complete license text.
+- [`THEORY.md`](THEORY.md) — mathematical derivations and theoretical details.
+- [`SECURITY_SCOPE.md`](SECURITY_SCOPE.md) — security boundaries and
+  interpretation of the cryptographic results.
+- [`BENCHMARKING.md`](BENCHMARKING.md) — benchmark methodology,
+  controls, reproducibility, and reporting conventions.
+- [`LICENSE`](LICENSE) — MIT License.
 
 ---
 
-## Bottom Line
+## One-Line Summary
 
-SHA256SW separates a mathematical property of a fixed-schedule compression
-state transformation from the cryptographic problem of recovering an unknown
-message.
-
-The essential result is:
-
-```text
-Fixed W
-   │
-   ▼
-E_W is a permutation
-   │
-   ▼
-B_W = E_W^-1
-   │
-   ├───────────────┐
-   ▼               ▼
-arbitrary S       S = 0^256
-   │               │
-   ▼               ▼
-unique H          H_fix
-                   │
-                   ▼
-             Davies-Meyer
-               freestart
-              fixed point
-```
-
-The corresponding standard-message problem is different:
-
-```text
-Fixed IV
-   │
-   ▼
-Unknown M
-   │
-   ▼
-Unknown/constrained W(M)
-   │
-   ▼
-Message search
-```
-
-The sliding-window inverse solves the first problem.
-
-It does not solve the second.
-
-The project's second major question is empirical:
-
-```text
-Does the sliding-window representation
-make equivalent SAT/SMT problems easier to solve?
-```
-
-That question is measured by controlled reduced-round and reduced-width
-experiments using the benchmark infrastructure.
-
-The central scientific claim can therefore be summarized in one sentence:
-
-> **SHA256SW provides an exact alternative representation of SHA-256 whose
+> **SHA256SW is an exact alternative representation of SHA-256 whose
 > fixed-schedule 64-round working-state transformation is algebraically
-> invertible, enabling deterministic freestart fixed-point construction for
-> known schedules without providing an inversion or collision attack against
-> the unknown message input of standard SHA-256.**
-````
+> invertible, enabling deterministic freestart fixed-point construction
+> without providing an inversion or collision attack against the unknown
+> message input of standard SHA-256.**
