@@ -4,6 +4,15 @@ An endian-independent, portable C11 implementation of SHA-256 with
 machine-checked SMT equivalence models and an automated SAT/SMT benchmark
 comparing conventional eight-register and sliding-window state formulations.
 
+> **Central result:** For every fixed 64-word SHA-256 message schedule
+> \(W=(W_0,\ldots,W_{63})\), the 64-round working-state transformation
+> \(E_W\) is a permutation of the 256-bit state space. The sliding-window
+> representation provides an explicit inverse \(E_W^{-1}\).
+>
+> This gives deterministic freestart fixed points for a **known message
+> schedule**. It does **not** provide an inversion, collision, or preimage
+> attack against standard SHA-256 with its fixed FIPS IV and unknown message.
+
 SHA256SW studies whether changing the representation of the SHA-256 working
 state can make reduced-round SAT/SMT problems easier to solve while
 preserving exactly the same mathematical function.
