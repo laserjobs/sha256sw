@@ -17,6 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ============================================================
+  # C TESTS
+  # ============================================================
   test:
     name: C tests
     runs-on: ubuntu-latest
@@ -30,7 +33,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -52,6 +55,10 @@ jobs:
       - name: Build and run C test suite
         run: make test
 
+
+  # ============================================================
+  # FORMAL VERIFICATION
+  # ============================================================
   formal:
     name: Formal verification
     runs-on: ubuntu-latest
@@ -66,7 +73,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Z3
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y z3
@@ -74,7 +81,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
-      - name: Verify Z3
+      - name: Verify Z3 installation
         run: |
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
@@ -98,6 +105,141 @@ jobs:
           echo "Generated SMT files:"
           printf '  %s\n' "${files[@]}"
 
+      - name: Upload SMT files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-smt-files
+          path: formal/*.smt2
+          if-no-files-found: warn
+
+
+  # ============================================================
+  # COLLISION FINDER
+  # Runs the actual collision_finder.py in the repository.
+  # ============================================================
+  collision-finder:
+    name: Collision Finder
+    runs-on: ubuntu-latest
+    needs: formal
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install z3-solver
+
+      - name: Verify Z3
+        run: |
+          z3 --version
+          python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
+
+      - name: Verify collision finder exists
+        run: |
+          test -f collision_finder.py
+          echo "Found collision_finder.py"
+
+      - name: Python syntax check
+        run: |
+          python3 -m py_compile collision_finder.py
+
+      # ----------------------------------------------------------
+      # Known-solvable smoke test.
+      #
+      # This should remain a required CI test because it verifies
+      # the complete solver -> SMT -> model -> verification path.
+      # ----------------------------------------------------------
+      - name: Run 4-round collision search
+        run: |
+          python3 collision_finder.py \
+            --solver z3 \
+            --rounds 4 \
+            --timeout 60
+
+      # ----------------------------------------------------------
+      # Experimental searches.
+      #
+      # These are allowed to time out because a timeout is a
+      # solver result, not necessarily a program failure.
+      # ----------------------------------------------------------
+      - name: Run 8-round collision search
+        shell: bash
+        run: |
+          set +e
+
+          python3 collision_finder.py \
+            --solver z3 \
+            --rounds 8 \
+            --timeout 60
+
+          status=$?
+
+          echo "8-round collision finder exit code: ${status}"
+
+          if [ "${status}" -ne 0 ] && [ "${status}" -ne 2 ]; then
+            echo "Collision finder failed with an unexpected exit code."
+            exit "${status}"
+          fi
+
+      - name: Run 9-round collision search
+        shell: bash
+        run: |
+          set +e
+
+          python3 collision_finder.py \
+            --solver z3 \
+            --rounds 9 \
+            --timeout 60
+
+          status=$?
+
+          echo "9-round collision finder exit code: ${status}"
+
+          if [ "${status}" -ne 0 ] && [ "${status}" -ne 2 ]; then
+            echo "Collision finder failed with an unexpected exit code."
+            exit "${status}"
+          fi
+
+      # ----------------------------------------------------------
+      # Preserve any generated SMT files/results for inspection.
+      # ----------------------------------------------------------
+      - name: Collect collision finder output
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p collision-results
+
+          find . -maxdepth 3 \
+            \( -name "*.smt2" -o -name "*collision*" -o -name "*.json" \) \
+            -print \
+            > collision-results/files.txt || true
+
+          cp collision_finder.py collision-results/ 2>/dev/null || true
+
+      - name: Upload collision finder artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collision-finder-results
+          path: collision-results/
+          if-no-files-found: warn
+
+
+  # ============================================================
+  # SYMBOLIC EQUIVALENCE BENCHMARK
+  # ============================================================
   benchmark-equivalence:
     name: Symbolic equivalence benchmark
     runs-on: ubuntu-latest
@@ -126,6 +268,10 @@ jobs:
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
+      - name: Check benchmark exists
+        run: |
+          test -f benchmark/sha256_representation_benchmark.py
+
       - name: Run Python syntax check
         run: |
           python3 -m py_compile \
@@ -145,6 +291,20 @@ jobs:
           test -s sha256sw_benchmark.json
           test -s sha256sw_benchmark.csv
 
+      - name: Upload equivalence results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sw-equivalence-results
+          path: |
+            sha256sw_benchmark.json
+            sha256sw_benchmark.csv
+          if-no-files-found: warn
+
+
+  # ============================================================
+  # REDUCED-ROUND COLLISION BENCHMARK
+  # ============================================================
   benchmark-collision:
     name: Reduced-round collision benchmark
     runs-on: ubuntu-latest
@@ -173,18 +333,11 @@ jobs:
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
-      - name: Check collision finder syntax
+      - name: Check benchmark exists
         run: |
-          python3 -m py_compile collision_finder.py
+          test -f benchmark/sha256_representation_benchmark.py
 
-      - name: Run collision finder smoke test
-        run: |
-          python3 collision_finder.py \
-            --solver z3 \
-            --rounds 4 \
-            --timeout 60
-
-      - name: Run collision benchmark
+      - name: Run reduced-round collision benchmark
         run: |
           python3 benchmark/sha256_representation_benchmark.py \
             z3 \
@@ -198,7 +351,7 @@ jobs:
           test -s sha256sw_benchmark.json
           test -s sha256sw_benchmark.csv
 
-      - name: Upload benchmark results
+      - name: Upload collision benchmark results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -207,3 +360,32 @@ jobs:
             sha256sw_benchmark.json
             sha256sw_benchmark.csv
           if-no-files-found: warn
+
+
+  # ============================================================
+  # FINAL STATUS
+  # ============================================================
+  ci-success:
+    name: CI complete
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - formal
+      - collision-finder
+      - benchmark-equivalence
+      - benchmark-collision
+
+    steps:
+      - name: All CI jobs passed
+        run: |
+          echo "========================================"
+          echo "SHA256SW CI COMPLETE"
+          echo "========================================"
+          echo
+          echo "C tests:                    PASS"
+          echo "Formal verification:        PASS"
+          echo "Collision finder:           PASS"
+          echo "Equivalence benchmark:      PASS"
+          echo "Collision benchmark:        PASS"
+          echo
+          echo "All required CI jobs completed."
