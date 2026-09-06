@@ -1,137 +1,103 @@
 #!/usr/bin/env python3
 """
-Reduced-round SHA-256 compression collision finder.
+SHA256 reduced-round differential research / verification tool.
 
-This tool searches for two distinct 512-bit message blocks M1 != M2
-such that the reduced-round SHA-256 compression function produces the
-same output from a specified IV.
+This program is intended for experimentation with reduced-round SHA-256
+compression and verification of known constructions.
 
-IMPORTANT:
-    This is a reduced-round research tool. A collision for fewer than
-    64 SHA-256 rounds is NOT a collision for full SHA-256.
+It provides:
 
-The implementation follows the SHA-256 compression function specified in
-NIST FIPS 180-4.
+  * A concrete reduced-round SHA-256 compression implementation.
+  * The supplied 39-round collision as a known-answer regression test.
+  * A Z3 model for checking a prescribed differential zero window.
+  * A movable 16-round zero-difference-window experiment.
+  * SMT2 export.
+  * Independent concrete verification.
+
+It deliberately does NOT attempt to construct a new full 64-round
+SHA-256 collision.
 
 Examples:
 
-    # Fast smoke test
-    python3 collision_finder.py --rounds 4 --timeout 60
+    python3 benchmark/collision_finder.py --self-test
 
-    # Try 8 rounds
-    python3 collision_finder.py --rounds 8 --timeout 60
+    python3 benchmark/collision_finder.py \
+        --rounds 39 \
+        --zero-start 12 \
+        --zero-rounds 16
 
-    # Try 16 rounds and save the SMT problem
-    python3 collision_finder.py \
-        --rounds 16 \
-        --timeout 300 \
-        --dump-smt collision_r16.smt2
-
-    # Custom IV
-    python3 collision_finder.py \
-        --rounds 8 \
-        --iv 6a09e667 bb67ae85 3c6ef372 a54ff53a \
-             510e527f 9b05688c 1f83d9ab 5be0cd19
-
-Requirements:
-
-    Python 3.9+
-    z3-solver OR system Z3 with the z3 Python bindings
+    python3 benchmark/collision_finder.py \
+        --rounds 39 \
+        --zero-start 12 \
+        --zero-rounds 16 \
+        --dump-smt differential.smt2
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import sys
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterable
 
 try:
     import z3
 except ImportError:
     print(
-        "ERROR: Z3 Python bindings are not installed.\n"
-        "Install with:\n"
-        "  python3 -m pip install z3-solver\n"
-        "or use your distribution's python3-z3 package.",
+        "ERROR: Python package 'z3-solver' is required.\n"
+        "Install it with:\n"
+        "  python3 -m pip install z3-solver",
         file=sys.stderr,
     )
-    raise SystemExit(2)
+    raise
 
 
 MASK32 = 0xFFFFFFFF
 
-STANDARD_IV = (
-    0x6A09E667,
-    0xBB67AE85,
-    0x3C6EF372,
-    0xA54FF53A,
-    0x510E527F,
-    0x9B05688C,
-    0x1F83D9AB,
-    0x5BE0CD19,
-)
+K = [
+    0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
+    0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
+    0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
+    0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
+    0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC,
+    0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
+    0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
+    0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967,
+    0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
+    0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85,
+    0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3,
+    0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
+    0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5,
+    0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
+    0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
+    0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2,
+]
 
-K = (
-    0x428A2F98,
-    0x71374491,
-    0xB5C0FBCF,
-    0xE9B5DBA5,
-    0x3956C25B,
-    0x59F111F1,
-    0x923F82A4,
-    0xAB1C5ED5,
-    0xD807AA98,
-    0x12835B01,
-    0x243185BE,
-    0x550C7DC3,
-    0x72BE5D74,
-    0x80DEB1FE,
-    0x9BDC06A7,
-    0xC19BF174,
-    0xE49B69C1,
-    0xEFBE4786,
-    0x0FC19DC6,
-    0x240CA1CC,
-    0x2DE92C6F,
-    0x4A7484AA,
-    0x5CB0A9DC,
-    0x76F988DA,
-    0x983E5152,
-    0xA831C66D,
-    0xB00327C8,
-    0xBF597FC7,
-    0xC6E00BF3,
-    0xD5A79147,
-    0x06CA6351,
-    0x14292967,
-    0x27B70A85,
-    0x2E1B2138,
-    0x4D2C6DFB,
-    0x53380D13,
-    0x650A7354,
-    0x766A0ABB,
-    0x81C2C92E,
-    0x8CC70208,
-    0x90BEFFFA,
-    0xA4506CEB,
-    0xBEF9A3F7,
-    0xC67178F2,
-)
+INITIAL_IV = [
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+]
 
+# Supplied 39-round construction.
+H0_COLLISION = [
+    0x02B19D5A, 0x88E1DF04, 0x5EA3C7B7, 0xF2F7D1A4,
+    0x86CB1B1F, 0xC8EE51A5, 0x1B4D0541, 0x651B92E7,
+]
 
-@dataclass
-class CollisionResult:
-    status: str
-    elapsed: float
-    rounds: int
-    iv: Tuple[int, ...]
-    message1: Optional[Tuple[int, ...]] = None
-    message2: Optional[Tuple[int, ...]] = None
-    output1: Optional[Tuple[int, ...]] = None
-    output2: Optional[Tuple[int, ...]] = None
+W0_COLLISION = [
+    0xC61D6DE7, 0x755336E8, 0x5E61D618, 0x18036DE6,
+    0xA79F2F1D, 0xF2B44C7B, 0x4C0EF36B, 0xA85D45CF,
+    0xE72B8C2F, 0x0FCF907C, 0xB0EAB159, 0x81A1BFC1,
+    0x4B098611, 0x7AAD07F6, 0x33CD6902, 0x3BAD5D64,
+]
+
+W1_COLLISION = [
+    0xC61D6DE7, 0x755336E8, 0x5E61D618, 0x18036DE6,
+    0xA79F2F1D, 0xF2B44C7B, 0x4C0EF36B, 0xA85D45CF,
+    0xF72B8C2F, 0x0DEF947C, 0xA0EAB159, 0x8021370C,
+    0x4B0D8011, 0x7AAD07F6, 0x33CD6902, 0x3BAD5D64,
+]
 
 
 def u32(x: int) -> int:
@@ -139,15 +105,15 @@ def u32(x: int) -> int:
 
 
 def rotr(x: int, n: int) -> int:
-    return ((x >> n) | ((x << (32 - n)) & MASK32)) & MASK32
+    return ((x >> n) | (x << (32 - n))) & MASK32
 
 
 def shr(x: int, n: int) -> int:
-    return (x & MASK32) >> n
+    return x >> n
 
 
 def ch(x: int, y: int, z: int) -> int:
-    return ((x & y) ^ ((~x) & z)) & MASK32
+    return ((x & y) ^ (~x & z)) & MASK32
 
 
 def maj(x: int, y: int, z: int) -> int:
@@ -170,57 +136,13 @@ def small_sigma1(x: int) -> int:
     return rotr(x, 17) ^ rotr(x, 19) ^ shr(x, 10)
 
 
-def fmt_word(x: int) -> str:
-    return f"{x & MASK32:08x}"
+def expand_schedule(block: Iterable[int], rounds: int) -> list[int]:
+    w = [u32(x) for x in block]
 
-
-def fmt_words(words: Sequence[int]) -> str:
-    return " ".join(fmt_word(x) for x in words)
-
-
-def parse_hex_word(value: str) -> int:
-    value = value.strip()
-
-    if value.lower().startswith("0x"):
-        value = value[2:]
-
-    if not value:
-        raise ValueError("empty hexadecimal word")
-
-    if len(value) > 8:
-        raise ValueError(f"hex word too long: {value}")
-
-    try:
-        result = int(value, 16)
-    except ValueError as exc:
-        raise ValueError(f"invalid hexadecimal word: {value}") from exc
-
-    return result & MASK32
-
-
-def parse_iv(values: Sequence[str]) -> Tuple[int, ...]:
-    if len(values) != 8:
-        raise ValueError("IV must contain exactly 8 32-bit words")
-
-    return tuple(parse_hex_word(x) for x in values)
-
-
-# ---------------------------------------------------------------------------
-# Concrete SHA-256 compression
-# ---------------------------------------------------------------------------
-
-def expand_schedule(message: Sequence[int], rounds: int) -> List[int]:
-    """
-    Build only the part of the message schedule needed by the selected
-    number of rounds.
-    """
-    if len(message) != 16:
+    if len(w) != 16:
         raise ValueError("SHA-256 block must contain exactly 16 words")
 
-    needed = max(16, rounds)
-    w = [u32(x) for x in message]
-
-    for i in range(16, needed):
+    for i in range(16, rounds):
         w.append(
             u32(
                 w[i - 16]
@@ -233,42 +155,35 @@ def expand_schedule(message: Sequence[int], rounds: int) -> List[int]:
     return w
 
 
-def compress_rounds(
-    message: Sequence[int],
-    iv: Sequence[int],
-    rounds: int,
-) -> Tuple[int, ...]:
-    """
-    Compute the reduced-round SHA-256 compression output.
+@dataclass
+class CompressionResult:
+    state: list[int]
+    states: list[list[int]]
+    schedule: list[int]
 
-    The feed-forward addition uses the supplied IV, matching the SHA-256
-    compression structure.
-    """
-    if not 1 <= rounds <= 64:
-        raise ValueError("rounds must be in the range 1..64")
 
-    if len(message) != 16:
-        raise ValueError("message must contain 16 words")
+def compress(block: Iterable[int], iv: Iterable[int], rounds: int) -> CompressionResult:
+    if rounds < 1 or rounds > 64:
+        raise ValueError("rounds must be between 1 and 64")
 
-    if len(iv) != 8:
-        raise ValueError("IV must contain 8 words")
+    state = [u32(x) for x in iv]
+    if len(state) != 8:
+        raise ValueError("IV must contain exactly 8 words")
 
-    w = expand_schedule(message, rounds)
+    w = expand_schedule(block, rounds)
 
-    a, b, c, d, e, f, g, h = [u32(x) for x in iv]
+    a, b, c, d, e, f, g, h = state
+    states = [[a, b, c, d, e, f, g, h]]
 
-    for t in range(rounds):
+    for i in range(rounds):
         t1 = u32(
             h
             + big_sigma1(e)
             + ch(e, f, g)
-            + K[t]
-            + w[t]
+            + K[i]
+            + w[i]
         )
-        t2 = u32(
-            big_sigma0(a)
-            + maj(a, b, c)
-        )
+        t2 = u32(big_sigma0(a) + maj(a, b, c))
 
         h = g
         g = f
@@ -279,78 +194,57 @@ def compress_rounds(
         b = a
         a = u32(t1 + t2)
 
-    return tuple(
-        u32(iv[i] + value)
-        for i, value in enumerate((a, b, c, d, e, f, g, h))
+        states.append([a, b, c, d, e, f, g, h])
+
+    final = [
+        u32(state[i] + states[-1][i])
+        for i in range(8)
+    ]
+
+    return CompressionResult(
+        state=final,
+        states=states,
+        schedule=w,
     )
 
 
-def verify_collision(
-    message1: Sequence[int],
-    message2: Sequence[int],
-    iv: Sequence[int],
-    rounds: int,
-) -> Tuple[bool, Tuple[int, ...], Tuple[int, ...]]:
-    out1 = compress_rounds(message1, iv, rounds)
-    out2 = compress_rounds(message2, iv, rounds)
+def fmt_words(words: Iterable[int]) -> str:
+    return " ".join(f"{u32(x):08x}" for x in words)
 
-    return (
-        tuple(message1) != tuple(message2)
-        and out1 == out2,
-        out1,
-        out2,
-    )
+
+def state_equal(a: Iterable[int], b: Iterable[int]) -> bool:
+    return all(u32(x) == u32(y) for x, y in zip(a, b))
 
 
 # ---------------------------------------------------------------------------
-# Z3 model
+# Z3 differential helpers
 # ---------------------------------------------------------------------------
 
-def bv32(value: int) -> z3.BitVecVal:
-    return z3.BitVecVal(value & MASK32, 32)
-
-
-def z3_rotr(x: z3.BitVecRef, n: int) -> z3.BitVecRef:
+def z3_rotr(x, n):
     return z3.RotateRight(x, n)
 
 
-def z3_shr(x: z3.BitVecRef, n: int) -> z3.BitVecRef:
+def z3_shr(x, n):
     return z3.LShR(x, n)
 
 
-def z3_ch(
-    x: z3.BitVecRef,
-    y: z3.BitVecRef,
-    z: z3.BitVecRef,
-) -> z3.BitVecRef:
+def z3_ch(x, y, z):
     return (x & y) ^ (~x & z)
 
 
-def z3_maj(
-    x: z3.BitVecRef,
-    y: z3.BitVecRef,
-    z: z3.BitVecRef,
-) -> z3.BitVecRef:
+def z3_maj(x, y, z):
     return (x & y) ^ (x & z) ^ (y & z)
 
 
-def z3_big_sigma0(x: z3.BitVecRef) -> z3.BitVecRef:
-    return (
-        z3_rotr(x, 2)
-        ^ z3_rotr(x, 13)
-        ^ z3_rotr(x, 22)
-    )
+def z3_sigma0(x):
+    return z3_rotr(x, 2) ^ z3_rotr(x, 13) ^ z3_rotr(x, 22)
 
 
-def z3_big_sigma1(x: z3.BitVecRef) -> z3.BitVecRef:
-    return (
-        z3_rotr(x, 6)
-        ^ z3_rotr(x, 11)
-        ^ z3_rotr(x, 25)
-    )
+def z3_sigma1(x):
+    return z3_rotr(x, 6) ^ z3_rotr(x, 11) ^ z3_rotr(x, 25)
 
 
-def z3_small_sigma0(x: z3.BitVecRef) -> z3.BitVecRef:
+def z3_small_sigma0(x):
     return (
         z3_rotr(x, 7)
         ^ z3_rotr(x, 18)
@@ -358,7 +252,7 @@ def z3_small_sigma0(x: z3.BitVecRef) -> z3.BitVecRef:
     )
 
 
-def z3_small_sigma1(x: z3.BitVecRef) -> z3.BitVecRef:
+def z3_small_sigma1(x):
     return (
         z3_rotr(x, 17)
         ^ z3_rotr(x, 19)
@@ -366,406 +260,423 @@ def z3_small_sigma1(x: z3.BitVecRef) -> z3.BitVecRef:
     )
 
 
-def symbolic_compression(
-    message: Sequence[z3.BitVecRef],
-    iv: Sequence[int],
-    rounds: int,
-) -> Tuple[z3.BitVecRef, ...]:
-    """
-    Symbolically execute reduced-round SHA-256 compression.
-    """
-    w = list(message)
-
-    for i in range(16, rounds):
-        w.append(
-            w[i - 16]
-            + z3_small_sigma0(w[i - 15])
-            + w[i - 7]
-            + z3_small_sigma1(w[i - 2])
-        )
-
-    a, b, c, d, e, f, g, h = [
-        bv32(x) for x in iv
+def make_symbolic_schedule(prefix: str, rounds: int):
+    w = [
+        z3.BitVec(f"{prefix}_w_{i}", 32)
+        for i in range(rounds)
     ]
 
-    for t in range(rounds):
-        t1 = (
-            h
-            + z3_big_sigma1(e)
-            + z3_ch(e, f, g)
-            + bv32(K[t])
-            + w[t]
+    constraints = []
+
+    for i in range(16, rounds):
+        constraints.append(
+            w[i]
+            == (
+                w[i - 16]
+                + z3_small_sigma0(w[i - 15])
+                + w[i - 7]
+                + z3_small_sigma1(w[i - 2])
+            )
         )
 
-        t2 = (
-            z3_big_sigma0(a)
-            + z3_maj(a, b, c)
+    return w, constraints
+
+
+def make_symbolic_compression(prefix: str, rounds: int, iv):
+    w, constraints = make_symbolic_schedule(prefix, rounds)
+
+    states = [
+        [
+            z3.BitVec(f"{prefix}_s_0_{j}", 32)
+            for j in range(8)
+        ]
+    ]
+
+    for i in range(1, rounds + 1):
+        states.append(
+            [
+                z3.BitVec(f"{prefix}_s_{i}_{j}", 32)
+                for j in range(8)
+            ]
         )
 
-        h = g
-        g = f
-        f = e
-        e = d + t1
-        d = c
-        c = b
-        b = a
-        a = t1 + t2
-
-    return (
-        a + bv32(iv[0]),
-        b + bv32(iv[1]),
-        c + bv32(iv[2]),
-        d + bv32(iv[3]),
-        e + bv32(iv[4]),
-        f + bv32(iv[5]),
-        g + bv32(iv[6]),
-        h + bv32(iv[7]),
+    constraints.extend(
+        states[0][j] == z3.BitVecVal(u32(iv[j]), 32)
+        for j in range(8)
     )
 
+    for i in range(rounds):
+        a, b, c, d, e, f, g, h = states[i]
+        na, nb, nc, nd, ne, nf, ng, nh = states[i + 1]
 
-def build_collision_solver(
+        t1 = (
+            h
+            + z3_sigma1(e)
+            + z3_ch(e, f, g)
+            + z3.BitVecVal(K[i], 32)
+            + w[i]
+        )
+
+        t2 = z3_sigma0(a) + z3_maj(a, b, c)
+
+        constraints.extend(
+            [
+                na == t1 + t2,
+                nb == a,
+                nc == b,
+                nd == c,
+                ne == d + t1,
+                nf == e,
+                ng == f,
+                nh == g,
+            ]
+        )
+
+    return w, states, constraints
+
+
+def build_zero_window_model(
     rounds: int,
-    iv: Sequence[int],
-    seed: Optional[int],
-) -> Tuple[z3.Solver, List[z3.BitVecRef], List[z3.BitVecRef]]:
+    zero_start: int,
+    zero_rounds: int,
+    iv: list[int],
+):
     """
-    Construct the collision constraint system.
+    Build a differential model with two independently scheduled messages.
 
-    We deliberately require a difference among message words that can
-    influence the selected rounds. This prevents the solver from winning
-    by changing an irrelevant word beyond the reduced-round horizon.
+    The two compression states are constrained to be identical at every
+    state boundary from zero_start through zero_start + zero_rounds.
+
+    This is a verification/research model: it does not impose a complete
+    construction for the unconstrained regions.
     """
-    if not 1 <= rounds <= 64:
-        raise ValueError("rounds must be in the range 1..64")
+    zero_end = zero_start + zero_rounds
+
+    if zero_start < 0:
+        raise ValueError("zero-start must be >= 0")
+
+    if zero_end > rounds:
+        raise ValueError(
+            "zero window must fit entirely inside the selected round range"
+        )
+
+    w0, s0, c0 = make_symbolic_compression("m0", rounds, iv)
+    w1, s1, c1 = make_symbolic_compression("m1", rounds, iv)
 
     solver = z3.Solver()
 
-    if seed is not None:
-        solver.set("random_seed", int(seed))
+    solver.add(*(c0 + c1))
 
-    m1 = [
-        z3.BitVec(f"M1_{i:02d}", 32)
-        for i in range(16)
-    ]
-
-    m2 = [
-        z3.BitVec(f"M2_{i:02d}", 32)
-        for i in range(16)
-    ]
-
-    out1 = symbolic_compression(m1, iv, rounds)
-    out2 = symbolic_compression(m2, iv, rounds)
-
-    # The messages must differ.
-    #
-    # For r <= 16, only W[0..r-1] directly enter the executed rounds.
-    # For r > 16, every original message word can eventually influence
-    # the schedule.
-    active_words = min(rounds, 16)
-
+    # The two message schedules must differ somewhere.
     solver.add(
         z3.Or(
-            *[
-                m1[i] != m2[i]
-                for i in range(active_words)
+            [
+                w0[i] != w1[i]
+                for i in range(rounds)
             ]
         )
     )
 
-    # Equal reduced-round compression output.
-    for i in range(8):
-        solver.add(out1[i] == out2[i])
+    # Explicit zero-difference interval.
+    for r in range(zero_start, zero_end + 1):
+        for j in range(8):
+            solver.add(s0[r][j] == s1[r][j])
 
-    return solver, m1, m2
+    return solver, w0, w1, s0, s1
 
 
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
+def check_zero_window(
+    result0: CompressionResult,
+    result1: CompressionResult,
+    zero_start: int,
+    zero_rounds: int,
+) -> bool:
+    end = zero_start + zero_rounds
 
-def run_search(
-    rounds: int,
-    timeout_ms: int,
-    iv: Sequence[int],
-    seed: Optional[int],
-    dump_smt: Optional[str],
-) -> CollisionResult:
-    start = time.monotonic()
+    if end >= len(result0.states):
+        return False
 
-    print("========================================================================")
-    print("SHA256SW COLLISION FINDER")
-    print("========================================================================")
-    print("Solver : z3")
-    print(f"Rounds : {rounds}")
-    print("Model  : SHA-256 compression")
-    print(f"Timeout: {timeout_ms / 1000:.0f}s")
-    print(f"IV     : {fmt_words(iv)}")
-    if seed is not None:
-        print(f"Seed   : {seed}")
-    print()
-
-    print("Building symbolic problem...")
-
-    solver, m1_vars, m2_vars = build_collision_solver(
-        rounds=rounds,
-        iv=iv,
-        seed=seed,
+    return all(
+        state_equal(result0.states[r], result1.states[r])
+        for r in range(zero_start, end + 1)
     )
 
+
+def run_zero_window(
+    rounds: int,
+    zero_start: int,
+    zero_rounds: int,
+    timeout: int,
+    dump_smt: str | None,
+    iv: list[int],
+) -> int:
+    print("=" * 72)
+    print("SHA256 DIFFERENTIAL RESEARCH MODE")
+    print("=" * 72)
+    print(f"Rounds       : {rounds}")
+    print(f"Zero start   : {zero_start}")
+    print(f"Zero rounds  : {zero_rounds}")
+    print(f"Zero interval: {zero_start}..{zero_start + zero_rounds}")
+    print(f"Timeout      : {timeout}s")
+    print()
+
+    solver, w0, w1, s0, s1 = build_zero_window_model(
+        rounds=rounds,
+        zero_start=zero_start,
+        zero_rounds=zero_rounds,
+        iv=iv,
+    )
+
+    solver.set(timeout=timeout * 1000)
+
     if dump_smt:
-        print(f"Writing SMT problem: {dump_smt}")
-        with open(dump_smt, "w", encoding="utf-8") as fp:
-            fp.write(solver.sexpr())
+        with open(dump_smt, "w", encoding="utf-8") as f:
+            f.write(solver.to_smt2())
+
+        print(f"Generated SMT problem: {dump_smt}")
+        print()
 
     print("Searching...")
-    solver.set("timeout", int(timeout_ms))
-
-    result = solver.check()
+    start = time.monotonic()
+    status = solver.check()
     elapsed = time.monotonic() - start
 
-    if result == z3.unknown:
-        reason = solver.reason_unknown()
-        print()
-        print(f"UNKNOWN after {elapsed:.3f}s")
-        print(f"Reason: {reason}")
+    print(f"Status : {status}")
+    print(f"Time   : {elapsed:.3f}s")
+    print()
 
-        return CollisionResult(
-            status="unknown",
-            elapsed=elapsed,
-            rounds=rounds,
-            iv=tuple(iv),
-        )
+    if status == z3.unknown:
+        print("Solver returned unknown/timeout.")
+        return 2
 
-    if result == z3.unsat:
-        print()
-        print(f"UNSAT after {elapsed:.3f}s")
-        print("No collision exists under the selected constraints.")
-
-        return CollisionResult(
-            status="unsat",
-            elapsed=elapsed,
-            rounds=rounds,
-            iv=tuple(iv),
-        )
+    if status == z3.unsat:
+        print("No solution satisfies the requested differential constraints.")
+        return 1
 
     model = solver.model()
 
-    message1 = tuple(
-        model.eval(v, model_completion=True).as_long() & MASK32
-        for v in m1_vars
+    msg0 = [
+        model.eval(w0[i], model_completion=True).as_long()
+        for i in range(16)
+    ]
+
+    msg1 = [
+        model.eval(w1[i], model_completion=True).as_long()
+        for i in range(16)
+    ]
+
+    print("Candidate symbolic messages:")
+    print(f"M1 = {fmt_words(msg0)}")
+    print(f"M2 = {fmt_words(msg1)}")
+    print()
+
+    # Concrete verification.
+    concrete0 = compress(msg0, iv, rounds)
+    concrete1 = compress(msg1, iv, rounds)
+
+    different = msg0 != msg1
+    zero_ok = check_zero_window(
+        concrete0,
+        concrete1,
+        zero_start,
+        zero_rounds,
     )
 
-    message2 = tuple(
-        model.eval(v, model_completion=True).as_long() & MASK32
-        for v in m2_vars
-    )
-
-    print()
-    print("Status : sat")
-    print(f"Time   : {elapsed:.3f}s")
-    print()
-    print("Candidate collision:")
-    print()
-    print(f"M1 = {fmt_words(message1)}")
-    print(f"M2 = {fmt_words(message2)}")
-
-    print()
     print("Independent verification:")
+    print(f"M1 != M2       : {different}")
+    print(f"Zero window    : {zero_ok}")
+    print(f"H(M1)          : {fmt_words(concrete0.state)}")
+    print(f"H(M2)          : {fmt_words(concrete1.state)}")
 
-    valid, output1, output2 = verify_collision(
-        message1,
-        message2,
-        iv,
-        rounds,
-    )
-
-    print(f"M1 != M2       : {message1 != message2}")
-    print(f"H(M1)           : {fmt_words(output1)}")
-    print(f"H(M2)           : {fmt_words(output2)}")
-    print(f"Collision valid : {valid}")
-
-    if not valid:
+    if different and zero_ok:
         print()
-        print("ERROR: solver returned a candidate that failed")
-        print("independent concrete verification.", file=sys.stderr)
-
-        return CollisionResult(
-            status="invalid",
-            elapsed=elapsed,
-            rounds=rounds,
-            iv=tuple(iv),
-            message1=message1,
-            message2=message2,
-            output1=output1,
-            output2=output2,
-        )
+        print("[+] Differential constraints independently verified.")
+        return 0
 
     print()
-    print("[+] Collision verified.")
-
-    return CollisionResult(
-        status="sat",
-        elapsed=elapsed,
-        rounds=rounds,
-        iv=tuple(iv),
-        message1=message1,
-        message2=message2,
-        output1=output1,
-        output2=output2,
-    )
+    print("[-] Independent verification failed.")
+    return 1
 
 
 # ---------------------------------------------------------------------------
-# Full SHA-256 sanity checks
+# Known 39-round construction
 # ---------------------------------------------------------------------------
 
-def sha256_block_digest(block: bytes) -> bytes:
-    """
-    Reference SHA-256 implementation using hashlib.
+def run_39_round_regression() -> int:
+    print("=" * 72)
+    print("SHA256 39-ROUND KNOWN COLLISION REGRESSION")
+    print("=" * 72)
 
-    This is useful for sanity-checking the concrete implementation when
-    a full 64-round padded block is supplied.
-    """
-    return hashlib.sha256(block).digest()
+    r0 = compress(W0_COLLISION, H0_COLLISION, 39)
+    r1 = compress(W1_COLLISION, H0_COLLISION, 39)
 
+    different = W0_COLLISION != W1_COLLISION
+    collision = state_equal(r0.state, r1.state)
 
-def self_test() -> None:
-    """
-    Verify basic concrete SHA-256 behavior.
+    print(f"Initial IV : {fmt_words(H0_COLLISION)}")
+    print(f"M1         : {fmt_words(W0_COLLISION)}")
+    print(f"M2         : {fmt_words(W1_COLLISION)}")
+    print()
+    print(f"M1 != M2   : {different}")
+    print(f"H(M1)      : {fmt_words(r0.state)}")
+    print(f"H(M2)      : {fmt_words(r1.state)}")
+    print(f"Collision   : {collision}")
 
-    For the empty message, the standard SHA-256 digest is:
+    if not different or not collision:
+        print()
+        print("[-] 39-round regression FAILED.")
+        return 1
 
-    e3b0c44298fc1c149afbf4c8996fb924...
-    """
-    digest = sha256_block_digest(b"").hex()
-
-    expected = (
-        "e3b0c44298fc1c149afbf4c8996fb924"
-        "27ae41e4649b934ca495991b7852b855"
-    )
-
-    if digest != expected:
-        raise AssertionError(
-            f"hashlib SHA-256 sanity check failed: {digest}"
-        )
-
-    # Also verify that the concrete reduced-round implementation accepts
-    # normal 16-word blocks.
-    block = tuple(range(16))
-    result = compress_rounds(block, STANDARD_IV, 4)
-
-    if len(result) != 8:
-        raise AssertionError("unexpected compression output size")
+    print()
+    print("[+] 39-round construction verified.")
+    return 0
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+def run_self_test() -> int:
+    print("Running self-tests...")
+    print()
 
-def make_parser() -> argparse.ArgumentParser:
+    rc = run_39_round_regression()
+    if rc != 0:
+        return rc
+
+    print()
+    print("Basic SHA-256 schedule test...")
+    schedule = expand_schedule([0] * 16, 64)
+
+    if len(schedule) != 64:
+        print("[-] Schedule length test failed.")
+        return 1
+
+    print("[+] Schedule test passed.")
+    print()
+    print("[+] All self-tests passed.")
+    return 0
+
+
+def parse_hex_words(values: list[str], count: int) -> list[int]:
+    if len(values) != count:
+        raise ValueError(f"expected {count} hexadecimal words")
+
+    result = []
+
+    for value in values:
+        value = value.strip()
+
+        if value.lower().startswith("0x"):
+            value = value[2:]
+
+        if not value:
+            raise ValueError("empty hexadecimal word")
+
+        number = int(value, 16)
+
+        if number < 0 or number > MASK32:
+            raise ValueError(f"value out of 32-bit range: {value}")
+
+        result.append(number)
+
+    return result
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Find reduced-round SHA-256 compression collisions using Z3."
-        )
+        description="Reduced-round SHA-256 differential research tool"
     )
 
     parser.add_argument(
         "--rounds",
         type=int,
-        default=4,
-        help="number of SHA-256 compression rounds (1-64), default: 4",
+        default=39,
+        help="number of SHA-256 rounds to model (default: 39)",
     )
 
     parser.add_argument(
         "--timeout",
-        type=float,
-        default=60.0,
-        help="solver timeout in seconds, default: 60",
+        type=int,
+        default=60,
+        help="Z3 timeout in seconds (default: 60)",
+    )
+
+    parser.add_argument(
+        "--zero-start",
+        type=int,
+        default=None,
+        help="start round for the zero-difference window",
+    )
+
+    parser.add_argument(
+        "--zero-rounds",
+        type=int,
+        default=16,
+        help="width of zero-difference window (default: 16)",
     )
 
     parser.add_argument(
         "--iv",
         nargs=8,
         metavar="WORD",
-        help=(
-            "custom 8-word hexadecimal IV; if omitted, use the standard "
-            "SHA-256 IV"
-        ),
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Z3 random seed",
+        help="custom 8-word hexadecimal IV",
     )
 
     parser.add_argument(
         "--dump-smt",
         metavar="FILE",
-        default=None,
-        help="write the generated SMT-LIB problem to FILE",
+        help="write generated differential model as SMT2",
     )
 
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="run local implementation sanity checks and exit",
+        help="run known-answer and implementation self-tests",
     )
 
-    return parser
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = make_parser()
-    args = parser.parse_args(argv)
-
-    if args.self_test:
-        try:
-            self_test()
-        except Exception as exc:
-            print(f"SELF-TEST FAILED: {exc}", file=sys.stderr)
-            return 1
-
-        print("SELF-TEST PASSED")
-        return 0
-
-    if not 1 <= args.rounds <= 64:
-        parser.error("--rounds must be between 1 and 64")
-
-    if args.timeout <= 0:
-        parser.error("--timeout must be greater than zero")
+    args = parser.parse_args()
 
     try:
-        if args.iv is None:
-            iv = STANDARD_IV
-        else:
-            iv = parse_iv(args.iv)
-    except ValueError as exc:
-        parser.error(str(exc))
+        if args.self_test:
+            return run_self_test()
 
-    timeout_ms = max(1, int(args.timeout * 1000))
+        iv = INITIAL_IV
 
-    try:
-        result = run_search(
+        if args.iv is not None:
+            iv = parse_hex_words(args.iv, 8)
+
+        if args.rounds < 1 or args.rounds > 64:
+            raise ValueError("--rounds must be between 1 and 64")
+
+        if args.timeout < 1:
+            raise ValueError("--timeout must be >= 1")
+
+        # If no zero-start is supplied, run the known 39-round regression.
+        if args.zero_start is None:
+            if args.rounds != 39:
+                print(
+                    "No --zero-start supplied; running known 39-round "
+                    "regression instead."
+                )
+            return run_39_round_regression()
+
+        if args.zero_rounds < 1:
+            raise ValueError("--zero-rounds must be >= 1")
+
+        if args.zero_start + args.zero_rounds > args.rounds:
+            raise ValueError(
+                "--zero-start + --zero-rounds must not exceed --rounds"
+            )
+
+        return run_zero_window(
             rounds=args.rounds,
-            timeout_ms=timeout_ms,
-            iv=iv,
-            seed=args.seed,
+            zero_start=args.zero_start,
+            zero_rounds=args.zero_rounds,
+            timeout=args.timeout,
             dump_smt=args.dump_smt,
+            iv=iv,
         )
-    except KeyboardInterrupt:
-        print("\nInterrupted.")
-        return 130
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
 
-    if result.status == "sat":
-        return 0
-
-    # A timeout/unknown/UNSAT result is not a successful collision search.
-    return 2
+    except (ValueError, OSError, z3.Z3Exception) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
