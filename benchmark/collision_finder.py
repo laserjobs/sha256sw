@@ -918,13 +918,18 @@ def self_test_sha256() -> bool:
     """
     Verify our full 64-round implementation against hashlib for a
     single-block SHA-256 message.
+
+    The comparison deliberately normalizes our 8-word display format
+    (which contains spaces) to the continuous hexadecimal format returned
+    by hashlib.hexdigest().
     """
 
     message = b"abc"
 
+    # Build the single 512-bit SHA-256 block for "abc".
     block_bytes = bytearray(64)
-    block_bytes[:3] = message
-    block_bytes[3] = 0x80
+    block_bytes[:len(message)] = message
+    block_bytes[len(message)] = 0x80
 
     bit_length = len(message) * 8
     block_bytes[56:64] = bit_length.to_bytes(8, "big")
@@ -943,14 +948,28 @@ def self_test_sha256() -> bool:
         64,
     )
 
-    ours = vector_hex(digest).lower()
+    # vector_hex() is intentionally human-readable and inserts spaces
+    # between 32-bit words. hashlib.hexdigest() does not.
+    ours = "".join(
+        f"{word & MASK32:08x}"
+        for word in digest
+    )
+
     reference = hashlib.sha256(message).hexdigest()
 
-    print(f"SHA-256 abc:")
-    print(f"  implementation: {ours}")
+    print("SHA-256 abc:")
+    print(f"  implementation: {vector_hex(digest)}")
     print(f"  hashlib       : {reference}")
 
-    return ours == reference
+    if ours != reference:
+        print()
+        print("ERROR: SHA-256 implementation mismatch.")
+        print(f"  normalized implementation: {ours}")
+        print(f"  hashlib reference        : {reference}")
+        return False
+
+    return True
+
 
 
 def self_test_primitives() -> bool:
