@@ -36,6 +36,7 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             z3 \
+            python3-z3 \
             libz3-dev
 
       - name: Show tool versions
@@ -65,7 +66,9 @@ jobs:
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y \
+            z3 \
+            python3-z3
 
       - name: Run formal verification
         run: make formal
@@ -104,12 +107,19 @@ jobs:
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y \
+            z3 \
+            python3-z3
 
-      - name: Run Python syntax check
+      - name: Run Python syntax checks
         run: |
           python3 -m py_compile \
+            collision_finder.py \
             benchmark/sha256_representation_benchmark.py
+
+      - name: Run collision finder self-test
+        run: |
+          python3 collision_finder.py --self-test
 
       - name: Run equivalence benchmark
         run: |
@@ -143,9 +153,11 @@ jobs:
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y \
+            z3 \
+            python3-z3
 
-      - name: Run collision benchmark
+      - name: Run existing collision benchmark
         run: |
           python3 benchmark/sha256_representation_benchmark.py \
             z3 \
@@ -187,16 +199,39 @@ jobs:
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y \
+            z3 \
+            python3-z3
+
+      - name: Check Z3
+        run: |
+          python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
+          z3 --version
 
       - name: Check collision finder syntax
         run: |
-          python3 -m py_compile \
-            benchmark/collision_finder.py
+          python3 -m py_compile collision_finder.py
 
-      - name: Run collision finder
+      - name: Run implementation self-test
         run: |
-          python3 benchmark/collision_finder.py \
+          python3 collision_finder.py --self-test
+
+      - name: Find deterministic 4-round collision
+        run: |
+          python3 collision_finder.py \
             --rounds 4 \
-            --model SW-Inline \
-            --timeout 60
+            --timeout 60 \
+            --seed 1 \
+            --dump-smt collision_r4.smt2
+
+      - name: Verify SMT export exists
+        run: |
+          test -s collision_r4.smt2
+
+      - name: Upload collision SMT problem
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collision-finder-smt
+          path: collision_r4.smt2
+          if-no-files-found: warn
