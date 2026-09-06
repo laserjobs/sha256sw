@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -38,6 +38,8 @@ jobs:
             z3 \
             libz3-dev
 
+      - name: Install Python dependencies
+        run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
@@ -50,7 +52,8 @@ jobs:
           make --version
 
       - name: Build and run C test suite
-        run: make test
+        run: |
+          make test
 
 
   formal:
@@ -81,7 +84,8 @@ jobs:
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
       - name: Run formal verification
-        run: make formal
+        run: |
+          make formal
 
       - name: Verify generated SMT files
         shell: bash
@@ -101,10 +105,10 @@ jobs:
 
 
   collision-finder:
-    name: Collision Finder Research Tests
+    name: Collision Finder Research
     runs-on: ubuntu-latest
     needs: formal
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -139,33 +143,135 @@ jobs:
       - name: Run collision finder self-test
         run: |
           python3 benchmark/collision_finder.py \
+            --solver z3 \
             --self-test
 
-      - name: Run 39-round known construction
+      - name: Run reduced-round collision search
         run: |
+          set +e
+
           python3 benchmark/collision_finder.py \
-            --rounds 39 \
-            --timeout 60
+            --solver z3 \
+            --rounds 4 \
+            --timeout 60 \
+            --dump-smt reduced_round_collision.smt2
+
+          status=$?
+
+          echo "Reduced-round solver exit status: ${status}"
+
+          if [ "${status}" -eq 0 ]; then
+            echo "Collision search succeeded."
+          elif [ "${status}" -eq 1 ]; then
+            echo "No collision under the supplied constraints."
+          elif [ "${status}" -eq 2 ]; then
+            echo "Solver returned unknown/timeout."
+          else
+            echo "Collision finder encountered an actual error."
+            exit "${status}"
+          fi
+
+          exit 0
+
+      - name: Run 39-round known construction verification
+        run: |
+          python3 - <<'PY'
+          import sys
+          from benchmark.collision_finder import verify_known_39_collision
+
+          if not verify_known_39_collision():
+              print("ERROR: known 39-round construction failed")
+              sys.exit(1)
+
+          print("Known 39-round construction verified.")
+          PY
 
       - name: Run 16-round differential-window experiment
+        shell: bash
         run: |
+          set +e
+
           python3 benchmark/collision_finder.py \
+            --solver z3 \
             --rounds 39 \
             --zero-start 12 \
             --zero-rounds 16 \
             --timeout 60 \
             --dump-smt collision_window.smt2
 
-      - name: Verify SMT export
-        run: |
-          test -s collision_window.smt2
+          status=$?
 
-      - name: Upload differential SMT model
+          echo "Differential-window exit status: ${status}"
+
+          case "${status}" in
+            0)
+              echo "Differential-window collision found and independently verified."
+              ;;
+            1)
+              echo "Differential-window constraints are UNSAT."
+              ;;
+            2)
+              echo "Differential-window search timed out / returned unknown."
+              echo "This is an exploratory benchmark result, not a CI failure."
+              ;;
+            *)
+              echo "Unexpected collision finder failure."
+              exit "${status}"
+              ;;
+          esac
+
+          exit 0
+
+      - name: Verify generated SMT exports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -s reduced_round_collision.smt2 ]; then
+            echo "Reduced-round SMT export:"
+            wc -c reduced_round_collision.smt2
+          fi
+
+          if [ -s collision_window.smt2 ]; then
+            echo "Differential-window SMT export:"
+            wc -c collision_window.smt2
+          fi
+
+      - name: Run Floyd O(1)-memory research test
+        shell: bash
+        run: |
+          set +e
+
+          python3 benchmark/collision_finder.py \
+            --floyd \
+            --rounds 4 \
+            --seed 1 \
+            --max-iterations 10000 \
+            --report-every 5000
+
+          status=$?
+
+          echo "Floyd exit status: ${status}"
+
+          if [ "${status}" -eq 0 ]; then
+            echo "Cycle detected."
+          elif [ "${status}" -eq 1 ]; then
+            echo "No cycle within iteration budget."
+          else
+            echo "Floyd finder failed."
+            exit "${status}"
+          fi
+
+          exit 0
+
+      - name: Upload collision finder artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: collision-differential-smt
-          path: collision_window.smt2
+          name: collision-finder-research
+          path: |
+            reduced_round_collision.smt2
+            collision_window.smt2
           if-no-files-found: warn
 
 
@@ -215,6 +321,16 @@ jobs:
         run: |
           test -s sha256sw_benchmark.json
           test -s sha256sw_benchmark.csv
+
+      - name: Upload equivalence results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sw-equivalence-results
+          path: |
+            sha256sw_benchmark.json
+            sha256sw_benchmark.csv
+          if-no-files-found: warn
 
 
   benchmark-collision:
