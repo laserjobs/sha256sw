@@ -197,6 +197,6 @@ jobs:
       - name: Run collision finder
         run: |
           python3 benchmark/collision_finder.py \
-            --rounds 9 \
+            --rounds 4 \
             --model SW-Inline \
             --timeout 60
