@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -45,8 +45,8 @@ jobs:
         run: |
           python3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
-          cc --version
           z3 --version
+          cc --version
           make --version
 
       - name: Build and run C test suite
@@ -101,7 +101,7 @@ jobs:
 
 
   collision-finder:
-    name: Collision Finder
+    name: Collision Finder Research Tests
     runs-on: ubuntu-latest
     needs: formal
     timeout-minutes: 15
@@ -123,38 +123,50 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
-      - name: Verify Z3
+      - name: Verify Z3 installation
         run: |
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
-      - name: Check collision finder
+      - name: Verify collision finder exists
         run: |
           test -f benchmark/collision_finder.py
+
+      - name: Python syntax check
+        run: |
           python3 -m py_compile benchmark/collision_finder.py
 
       - name: Run collision finder self-test
         run: |
-          python3 benchmark/collision_finder.py --self-test
+          python3 benchmark/collision_finder.py \
+            --self-test
 
-      - name: Run 4-round collision finder
+      - name: Run 39-round known construction
         run: |
           python3 benchmark/collision_finder.py \
-            --rounds 4 \
+            --rounds 39 \
             --timeout 60
 
-      - name: Run 8-round collision finder
+      - name: Run 16-round differential-window experiment
         run: |
           python3 benchmark/collision_finder.py \
-            --rounds 8 \
-            --timeout 60
+            --rounds 39 \
+            --zero-start 12 \
+            --zero-rounds 16 \
+            --timeout 60 \
+            --dump-smt collision_window.smt2
 
-      - name: Run 9-round collision finder
-        continue-on-error: true
+      - name: Verify SMT export
         run: |
-          python3 benchmark/collision_finder.py \
-            --rounds 9 \
-            --timeout 60
+          test -s collision_window.smt2
+
+      - name: Upload differential SMT model
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collision-differential-smt
+          path: collision_window.smt2
+          if-no-files-found: warn
 
 
   benchmark-equivalence:
@@ -206,7 +218,7 @@ jobs:
 
 
   benchmark-collision:
-    name: Reduced-round collision benchmark
+    name: Reduced-round Collision Benchmark
     runs-on: ubuntu-latest
     needs: formal
     timeout-minutes: 10
@@ -233,7 +245,7 @@ jobs:
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
-      - name: Run collision benchmark
+      - name: Run reduced-round collision benchmark
         run: |
           python3 benchmark/sha256_representation_benchmark.py \
             z3 \
