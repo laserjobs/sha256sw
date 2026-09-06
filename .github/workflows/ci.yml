@@ -55,7 +55,6 @@ jobs:
       - name: Build and run C test suite
         run: make test
 
-
   # ============================================================
   # FORMAL VERIFICATION
   # ============================================================
@@ -81,7 +80,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
-      - name: Verify Z3 installation
+      - name: Verify Z3
         run: |
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
@@ -113,10 +112,8 @@ jobs:
           path: formal/*.smt2
           if-no-files-found: warn
 
-
   # ============================================================
   # COLLISION FINDER
-  # Runs the actual collision_finder.py in the repository.
   # ============================================================
   collision-finder:
     name: Collision Finder
@@ -148,38 +145,29 @@ jobs:
 
       - name: Verify collision finder exists
         run: |
-          test -f collision_finder.py
-          echo "Found collision_finder.py"
+          test -f benchmark/collision_finder.py
+          echo "Found benchmark/collision_finder.py"
 
       - name: Python syntax check
         run: |
-          python3 -m py_compile collision_finder.py
+          python3 -m py_compile benchmark/collision_finder.py
 
-      # ----------------------------------------------------------
-      # Known-solvable smoke test.
-      #
-      # This should remain a required CI test because it verifies
-      # the complete solver -> SMT -> model -> verification path.
-      # ----------------------------------------------------------
+      # Known-solvable reduced-round test.
       - name: Run 4-round collision search
         run: |
-          python3 collision_finder.py \
+          python3 benchmark/collision_finder.py \
             --solver z3 \
             --rounds 4 \
             --timeout 60
 
-      # ----------------------------------------------------------
-      # Experimental searches.
-      #
-      # These are allowed to time out because a timeout is a
-      # solver result, not necessarily a program failure.
-      # ----------------------------------------------------------
+      # Experimental search.
+      # Exit code 2 is treated as a solver timeout.
       - name: Run 8-round collision search
         shell: bash
         run: |
           set +e
 
-          python3 collision_finder.py \
+          python3 benchmark/collision_finder.py \
             --solver z3 \
             --rounds 8 \
             --timeout 60
@@ -189,7 +177,7 @@ jobs:
           echo "8-round collision finder exit code: ${status}"
 
           if [ "${status}" -ne 0 ] && [ "${status}" -ne 2 ]; then
-            echo "Collision finder failed with an unexpected exit code."
+            echo "Collision finder failed with unexpected exit code."
             exit "${status}"
           fi
 
@@ -198,7 +186,7 @@ jobs:
         run: |
           set +e
 
-          python3 collision_finder.py \
+          python3 benchmark/collision_finder.py \
             --solver z3 \
             --rounds 9 \
             --timeout 60
@@ -208,34 +196,30 @@ jobs:
           echo "9-round collision finder exit code: ${status}"
 
           if [ "${status}" -ne 0 ] && [ "${status}" -ne 2 ]; then
-            echo "Collision finder failed with an unexpected exit code."
+            echo "Collision finder failed with unexpected exit code."
             exit "${status}"
           fi
 
-      # ----------------------------------------------------------
-      # Preserve any generated SMT files/results for inspection.
-      # ----------------------------------------------------------
-      - name: Collect collision finder output
+      - name: Collect collision finder results
         if: always()
         shell: bash
         run: |
           mkdir -p collision-results
 
-          find . -maxdepth 3 \
+          cp benchmark/collision_finder.py collision-results/
+
+          find . -maxdepth 3 -type f \
             \( -name "*.smt2" -o -name "*collision*" -o -name "*.json" \) \
             -print \
             > collision-results/files.txt || true
 
-          cp collision_finder.py collision-results/ 2>/dev/null || true
-
-      - name: Upload collision finder artifacts
+      - name: Upload collision finder results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: collision-finder-results
           path: collision-results/
           if-no-files-found: warn
-
 
   # ============================================================
   # SYMBOLIC EQUIVALENCE BENCHMARK
@@ -301,7 +285,6 @@ jobs:
             sha256sw_benchmark.csv
           if-no-files-found: warn
 
-
   # ============================================================
   # REDUCED-ROUND COLLISION BENCHMARK
   # ============================================================
@@ -361,9 +344,8 @@ jobs:
             sha256sw_benchmark.csv
           if-no-files-found: warn
 
-
   # ============================================================
-  # FINAL STATUS
+  # FINAL CI STATUS
   # ============================================================
   ci-success:
     name: CI complete
