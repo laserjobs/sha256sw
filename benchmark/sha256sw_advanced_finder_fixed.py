@@ -7,13 +7,13 @@ Reduced-round SHA-256 sliding-window / bidirectional research harness.
 This is a research/benchmark implementation. It does NOT claim to
 produce a practical full-round SHA-256 collision.
 
-The program contains two deliberately separate layers:
+The implementation contains two deliberately separate layers:
 
 1. A concrete SHA-256 implementation used as the reference implementation.
 2. A CP-SAT bit-level encoding used for reduced-round experiments.
 
 Any solver witness is independently recomputed with the concrete
-implementation before it is reported as valid.
+SHA-256 implementation before it is reported as valid.
 
 Dependencies
 ------------
@@ -147,7 +147,9 @@ def expand_schedule(
     rounds: int,
 ) -> List[int]:
     if len(block) != 16:
-        raise ValueError("SHA-256 compression requires exactly 16 input words.")
+        raise ValueError(
+            "SHA-256 compression requires exactly 16 input words."
+        )
 
     if not 1 <= rounds <= 64:
         raise ValueError("rounds must be between 1 and 64.")
@@ -385,8 +387,8 @@ class CPSATSWFinder:
     Bit-level CP-SAT sliding-window bidirectional model.
 
     A single collision boundary S_R is shared by both message paths.
-    Solver assignments are always independently verified with the
-    concrete SHA-256 implementation.
+    Solver assignments are independently verified with the concrete
+    SHA-256 implementation.
     """
 
     def __init__(
@@ -400,7 +402,9 @@ class CPSATSWFinder:
             raise ValueError("rounds must be between 1 and 64.")
 
         if not 1 <= meet_k < rounds:
-            raise ValueError("meet_k must satisfy 1 <= meet_k < rounds.")
+            raise ValueError(
+                "meet_k must satisfy 1 <= meet_k < rounds."
+            )
 
         if difference_round is None:
             difference_round = (
@@ -409,7 +413,9 @@ class CPSATSWFinder:
             )
 
         if not 0 <= difference_round <= rounds:
-            raise ValueError("difference_round outside round range.")
+            raise ValueError(
+                "difference_round outside round range."
+            )
 
         self.rounds = rounds
         self.meet_k = meet_k
@@ -459,40 +465,31 @@ class CPSATSWFinder:
     # Boolean / arithmetic primitives
     # ----------------------------------------------------------------------
 
-        def _add_u32(
+    def _add_u32(
         self,
         addends: Sequence[BitVector],
         prefix: str,
     ) -> BitVector:
         """
-        Ripple-carry addition of arbitrary 32-bit vectors modulo 2^32.
+        Ripple-carry addition modulo 2^32.
 
-        Each input word is represented little-endian by bit index.
+        Each BitVector is little-endian by bit index.
 
-        For n one-bit operands, the carry into a bit can be as large as
-        n - 1.  The carry bound therefore uses n - 1 rather than n // 2.
-
-        Example:
-            adding three 1-bit values with an incoming carry of 1 can
-            produce 4, requiring an outgoing carry of 2.
-
-        The final carry beyond bit 31 is intentionally discarded because
-        SHA-256 arithmetic is modulo 2^32.
+        For n binary addends, the carry can range from 0 through n-1.
+        The final carry beyond bit 31 is discarded.
         """
         if not addends:
             raise ValueError("At least one addend is required.")
+
+        for word in addends:
+            if len(word) != 32:
+                raise ValueError("All bit-vectors must contain 32 bits.")
 
         out: BitVector = []
 
         n = len(addends)
 
-        # Maximum stable carry for n binary addends is n - 1.
-        #
-        # For example, with three addends:
-        #
-        #   1 + 1 + 1 + carry(1) = 4
-        #
-        # so carry_out can be 2.
+        # Maximum carry after adding n bits is n - 1.
         carry_max = max(0, n - 1)
 
         carry = 0
@@ -509,7 +506,8 @@ class CPSATSWFinder:
             )
 
             self.model.Add(
-                sum(x[bit] for x in addends) + carry
+                sum(word[bit] for word in addends)
+                + carry
                 == result + 2 * carry_out
             )
 
@@ -518,14 +516,22 @@ class CPSATSWFinder:
 
         return out
 
-
     def _sub_u32(
         self,
         a: BitVector,
         b: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        Ripple-borrow subtraction:
+
+            result = a - b (mod 2^32)
+        """
+        if len(a) != 32 or len(b) != 32:
+            raise ValueError("All bit-vectors must contain 32 bits.")
+
         result: BitVector = []
+
         borrow = 0
 
         for bit in range(32):
@@ -533,15 +539,22 @@ class CPSATSWFinder:
                 f"{prefix}_bit_{bit}"
             )
 
-            borrow_out = self.model.NewIntVar(
-                0,
-                1,
+            borrow_out = self.model.NewBoolVar(
                 f"{prefix}_borrow_{bit}"
             )
 
+            # a_bit - b_bit - borrow =
+            #     r - 2*borrow_out
+            #
+            # Rearranged:
+            #
+            # r + b + borrow = a + 2*borrow_out
             self.model.Add(
-                r + b[bit] + borrow
-                == a[bit] + 2 * borrow_out
+                r
+                + b[bit]
+                + borrow
+                == a[bit]
+                + 2 * borrow_out
             )
 
             result.append(r)
@@ -551,15 +564,17 @@ class CPSATSWFinder:
 
     def _xor3(
         self,
-        a,
-        b,
-        c,
+        a: BitVector,
+        b: BitVector,
+        c: BitVector,
         prefix: str,
     ) -> BitVector:
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             self.model.AddBoolXOr([
                 a[bit],
@@ -579,10 +594,15 @@ class CPSATSWFinder:
         z: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        SHA-256 Ch(x,y,z) = (x & y) ^ (~x & z).
+        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             self.model.Add(
                 q == y[bit]
@@ -603,10 +623,15 @@ class CPSATSWFinder:
         c: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        SHA-256 Maj(a,b,c).
+        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             total = a[bit] + b[bit] + c[bit]
 
@@ -631,10 +656,15 @@ class CPSATSWFinder:
         x: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        ROTR^2(x) XOR ROTR^13(x) XOR ROTR^22(x).
+        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             self.model.AddBoolXOr([
                 x[(bit + 2) % 32],
@@ -652,10 +682,15 @@ class CPSATSWFinder:
         x: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        ROTR^6(x) XOR ROTR^11(x) XOR ROTR^25(x).
+        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             self.model.AddBoolXOr([
                 x[(bit + 6) % 32],
@@ -673,10 +708,15 @@ class CPSATSWFinder:
         x: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        ROTR^7(x) XOR ROTR^18(x) XOR SHR^3(x).
+        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             literals = [
                 x[(bit + 7) % 32],
@@ -699,10 +739,15 @@ class CPSATSWFinder:
         x: BitVector,
         prefix: str,
     ) -> BitVector:
+        """
+        ROTR^17(x) XOR ROTR^19(x) XOR SHR^10(x).
+        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(f"{prefix}_{bit}")
+            q = self.model.NewBoolVar(
+                f"{prefix}_{bit}"
+            )
 
             literals = [
                 x[(bit + 17) % 32],
@@ -729,6 +774,11 @@ class CPSATSWFinder:
         message_words: List[BitVector],
         prefix: str,
     ):
+        if len(message_words) != 16:
+            raise ValueError(
+                "A SHA-256 message block must contain 16 words."
+            )
+
         w = list(message_words)
 
         for t in range(16, self.rounds):
@@ -744,10 +794,10 @@ class CPSATSWFinder:
 
             wt = self._add_u32(
                 [
-                    s1,
-                    w[t - 7],
-                    s0,
                     w[t - 16],
+                    s0,
+                    w[t - 7],
+                    s1,
                 ],
                 f"{prefix}_W_{t}",
             )
@@ -812,7 +862,8 @@ class CPSATSWFinder:
 
         if not difference_bits:
             raise ValueError(
-                "active_words_range contains no consumed message words."
+                "active_words_range contains no consumed "
+                "message words."
             )
 
         self.model.AddBoolOr(difference_bits)
@@ -1231,8 +1282,17 @@ class CPSATSWFinder:
         m1 = self.extract_message(solver, self.m1)
         m2 = self.extract_message(solver, self.m2)
 
-        s1 = sha256_compress(m1, self.rounds, self.iv)
-        s2 = sha256_compress(m2, self.rounds, self.iv)
+        s1 = sha256_compress(
+            m1,
+            self.rounds,
+            self.iv,
+        )
+
+        s2 = sha256_compress(
+            m2,
+            self.rounds,
+            self.iv,
+        )
 
         valid_collision = (
             s1[-1] == s2[-1]
@@ -1259,6 +1319,7 @@ class CPSATSWFinder:
                 "\n    M1:",
                 " ".join(f"{x:08x}" for x in m1),
             )
+
             print(
                 "    M2:",
                 " ".join(f"{x:08x}" for x in m2),
@@ -1297,7 +1358,9 @@ def abc_block() -> Tuple[int, ...]:
     )
 
 
-def random_block(rng: random.Random) -> Tuple[int, ...]:
+def random_block(
+    rng: random.Random,
+) -> Tuple[int, ...]:
     return tuple(
         rng.getrandbits(32)
         for _ in range(16)
@@ -1324,10 +1387,12 @@ def test_sha256_abc():
         for i in range(8)
     )
 
-    expected = hashlib.sha256(b"abc").hexdigest()
+    expected = hashlib.sha256(
+        b"abc"
+    ).hexdigest()
 
     assert digest == expected, (
-        f"SHA-256 mismatch:\n"
+        "SHA-256 mismatch:\n"
         f"implementation = {digest}\n"
         f"hashlib       = {expected}"
     )
@@ -1337,8 +1402,16 @@ def test_round_inversion():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(block, rounds, IV)
-    w = expand_schedule(block, rounds)
+    states = sha256_compress(
+        block,
+        rounds,
+        IV,
+    )
+
+    w = expand_schedule(
+        block,
+        rounds,
+    )
 
     for r in range(rounds - 1, -1, -1):
         recovered = invert_round(
@@ -1356,7 +1429,11 @@ def test_sliding_window():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(block, rounds, IV)
+    states = sha256_compress(
+        block,
+        rounds,
+        IV,
+    )
 
     A, E = forward_sw_concrete(
         block,
@@ -1368,7 +1445,11 @@ def test_sliding_window():
     assert len(E) == rounds + 4
 
     for i in range(rounds + 1):
-        recovered = window_to_state(A, E, i)
+        recovered = window_to_state(
+            A,
+            E,
+            i,
+        )
 
         assert recovered == states[i], (
             f"Sliding-window mismatch at state {i}"
@@ -1379,7 +1460,11 @@ def test_backward_window():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(block, rounds, IV)
+    states = sha256_compress(
+        block,
+        rounds,
+        IV,
+    )
 
     A, E = backward_sw_concrete(
         block,
@@ -1388,7 +1473,11 @@ def test_backward_window():
     )
 
     for i in range(rounds + 1):
-        recovered = window_to_state(A, E, i)
+        recovered = window_to_state(
+            A,
+            E,
+            i,
+        )
 
         assert recovered == states[i], (
             f"Backward reconstruction mismatch at state {i}"
@@ -1399,8 +1488,16 @@ def test_individual_inverse_rounds():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(block, rounds, IV)
-    w = expand_schedule(block, rounds)
+    states = sha256_compress(
+        block,
+        rounds,
+        IV,
+    )
+
+    w = expand_schedule(
+        block,
+        rounds,
+    )
 
     for r in (
         0,
@@ -1425,7 +1522,16 @@ def test_individual_inverse_rounds():
 def test_random_concrete_rounds():
     rng = random.Random(0x53484132)
 
-    for rounds in (1, 2, 4, 8, 16, 32, 40, 64):
+    for rounds in (
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        40,
+        64,
+    ):
         for _ in range(5):
             block = random_block(rng)
 
@@ -1458,7 +1564,11 @@ def test_random_concrete_rounds():
 
             for i in range(rounds + 1):
                 assert (
-                    window_to_state(A, E, i)
+                    window_to_state(
+                        A,
+                        E,
+                        i,
+                    )
                     == states[i]
                 )
 
@@ -1470,7 +1580,11 @@ def test_random_concrete_rounds():
 
             for i in range(rounds + 1):
                 assert (
-                    window_to_state(Ab, Eb, i)
+                    window_to_state(
+                        Ab,
+                        Eb,
+                        i,
+                    )
                     == states[i]
                 )
 
@@ -1486,8 +1600,12 @@ def _make_fixed_word(
 ) -> BitVector:
     bits = []
 
+    value &= MASK32
+
     for bit in range(32):
-        b = model.NewBoolVar(f"{prefix}_{bit}")
+        b = model.NewBoolVar(
+            f"{prefix}_{bit}"
+        )
 
         model.Add(
             b == ((value >> bit) & 1)
@@ -1498,22 +1616,24 @@ def _make_fixed_word(
     return bits
 
 
-def _solve_and_word(
+def _solve_model(
     model: cp_model.CpModel,
-    bits: BitVector,
-) -> int:
+    timeout: float = 5.0,
+):
     solver = cp_model.CpSolver()
 
-    solver.parameters.max_time_in_seconds = 5.0
+    solver.parameters.max_time_in_seconds = timeout
     solver.parameters.num_search_workers = 1
 
     status = solver.Solve(model)
 
-    assert status in (
-        cp_model.OPTIMAL,
-        cp_model.FEASIBLE,
-    ), solver.StatusName(status)
+    return solver, status
 
+
+def _bits_value(
+    solver: cp_model.CpSolver,
+    bits: BitVector,
+) -> int:
     value = 0
 
     for bit, b in enumerate(bits):
@@ -1523,109 +1643,402 @@ def _solve_and_word(
 
 
 def test_cpsat_bit_primitives():
+    """
+    Verify every CP-SAT primitive independently against the
+    concrete SHA-256 primitive.
+
+    Each primitive gets its own model. This makes a primitive
+    encoding bug immediately identifiable instead of collapsing
+    into a generic INFEASIBLE result in one giant model.
+    """
     rng = random.Random(0x43505341)
 
     for case in range(4):
-        model = cp_model.CpModel()
-        finder = CPSATSWFinder(
-            rounds=2,
-            meet_k=1,
-        )
-
-        # Use the independent model only as a holder for the primitive
-        # methods, while constructing this tiny equivalence model.
-        finder.model = model
-
         x = rng.getrandbits(32)
         y = rng.getrandbits(32)
         z = rng.getrandbits(32)
 
-        xb = _make_fixed_word(model, x, f"x_{case}")
-        yb = _make_fixed_word(model, y, f"y_{case}")
-        zb = _make_fixed_word(model, z, f"z_{case}")
+        # --------------------------------------------------------------
+        # Addition
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
 
-        add = finder._add_u32(
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"add_x_{case}",
+        )
+
+        yb = _make_fixed_word(
+            model,
+            y,
+            f"add_y_{case}",
+        )
+
+        zb = _make_fixed_word(
+            model,
+            z,
+            f"add_z_{case}",
+        )
+
+        add = holder._add_u32(
             [xb, yb, zb],
             f"add_{case}",
         )
 
-        sub = finder._sub_u32(
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT addition primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            add,
+        ) == u32(x + y + z), (
+            f"addition primitive mismatch at case {case}"
+        )
+
+        # --------------------------------------------------------------
+        # Subtraction
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
+
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"sub_x_{case}",
+        )
+
+        yb = _make_fixed_word(
+            model,
+            y,
+            f"sub_y_{case}",
+        )
+
+        sub = holder._sub_u32(
             xb,
             yb,
             f"sub_{case}",
         )
 
-        ch = finder._ch(
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT subtraction primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            sub,
+        ) == u32(x - y), (
+            f"subtraction primitive mismatch at case {case}"
+        )
+
+        # --------------------------------------------------------------
+        # Ch
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
+
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"ch_x_{case}",
+        )
+
+        yb = _make_fixed_word(
+            model,
+            y,
+            f"ch_y_{case}",
+        )
+
+        zb = _make_fixed_word(
+            model,
+            z,
+            f"ch_z_{case}",
+        )
+
+        ch = holder._ch(
             xb,
             yb,
             zb,
             f"ch_{case}",
         )
 
-        maj = finder._maj(
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT Ch primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            ch,
+        ) == Ch(x, y, z), (
+            f"Ch primitive mismatch at case {case}"
+        )
+
+        # --------------------------------------------------------------
+        # Maj
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
+
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"maj_x_{case}",
+        )
+
+        yb = _make_fixed_word(
+            model,
+            y,
+            f"maj_y_{case}",
+        )
+
+        zb = _make_fixed_word(
+            model,
+            z,
+            f"maj_z_{case}",
+        )
+
+        maj = holder._maj(
             xb,
             yb,
             zb,
             f"maj_{case}",
         )
 
-        s0 = finder._big_sigma0(
-            xb,
-            f"s0_{case}",
-        )
-
-        s1 = finder._big_sigma1(
-            xb,
-            f"s1_{case}",
-        )
-
-        ss0 = finder._small_sigma0(
-            xb,
-            f"ss0_{case}",
-        )
-
-        ss1 = finder._small_sigma1(
-            xb,
-            f"ss1_{case}",
-        )
-
-        solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 5.0
-        solver.parameters.num_search_workers = 1
-
-        status = solver.Solve(model)
+        solver, status = _solve_model(model)
 
         assert status in (
             cp_model.OPTIMAL,
             cp_model.FEASIBLE,
-        ), solver.StatusName(status)
+        ), (
+            f"CP-SAT Maj primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
 
-        def value(bits):
-            out = 0
+        assert _bits_value(
+            solver,
+            maj,
+        ) == Maj(x, y, z), (
+            f"Maj primitive mismatch at case {case}"
+        )
 
-            for bit, b in enumerate(bits):
-                out |= int(solver.Value(b)) << bit
+        # --------------------------------------------------------------
+        # Sigma0
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
 
-            return out & MASK32
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
 
-        assert value(add) == u32(x + y + z)
-        assert value(sub) == u32(x - y)
-        assert value(ch) == Ch(x, y, z)
-        assert value(maj) == Maj(x, y, z)
-        assert value(s0) == Sigma0(x)
-        assert value(s1) == Sigma1(x)
-        assert value(ss0) == sigma0(x)
-        assert value(ss1) == sigma1(x)
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"s0_x_{case}",
+        )
+
+        s0 = holder._big_sigma0(
+            xb,
+            f"s0_{case}",
+        )
+
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT Sigma0 primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            s0,
+        ) == Sigma0(x), (
+            f"Sigma0 primitive mismatch at case {case}"
+        )
+
+        # --------------------------------------------------------------
+        # Sigma1
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
+
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"s1_x_{case}",
+        )
+
+        s1 = holder._big_sigma1(
+            xb,
+            f"s1_{case}",
+        )
+
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT Sigma1 primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            s1,
+        ) == Sigma1(x), (
+            f"Sigma1 primitive mismatch at case {case}"
+        )
+
+        # --------------------------------------------------------------
+        # small sigma0
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
+
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"ss0_x_{case}",
+        )
+
+        ss0 = holder._small_sigma0(
+            xb,
+            f"ss0_{case}",
+        )
+
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT small-sigma0 primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            ss0,
+        ) == sigma0(x), (
+            f"small sigma0 primitive mismatch at case {case}"
+        )
+
+        # --------------------------------------------------------------
+        # small sigma1
+        # --------------------------------------------------------------
+        model = cp_model.CpModel()
+
+        holder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        holder.model = model
+
+        xb = _make_fixed_word(
+            model,
+            x,
+            f"ss1_x_{case}",
+        )
+
+        ss1 = holder._small_sigma1(
+            xb,
+            f"ss1_{case}",
+        )
+
+        solver, status = _solve_model(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), (
+            f"CP-SAT small-sigma1 primitive became "
+            f"{solver.StatusName(status)} "
+            f"for case {case}"
+        )
+
+        assert _bits_value(
+            solver,
+            ss1,
+        ) == sigma1(x), (
+            f"small sigma1 primitive mismatch at case {case}"
+        )
 
 
 def test_cpsat_trajectory_equivalence():
     """
-    Pin a complete random message into the CP-SAT model and verify the
-    modeled forward trajectory against the concrete implementation.
-
-    This is the critical regression test for the bit-level encoding.
+    Pin a complete random message into the CP-SAT model and verify
+    the modeled forward trajectory against concrete SHA-256.
     """
-
     rng = random.Random(0x5452414A)
 
     rounds = 6
@@ -1636,8 +2049,13 @@ def test_cpsat_trajectory_equivalence():
         difference_round=3,
     )
 
-    finder.m1 = finder._new_message("test_path1")
-    finder.m2 = finder._new_message("test_path2")
+    finder.m1 = finder._new_message(
+        "test_path1"
+    )
+
+    finder.m2 = finder._new_message(
+        "test_path2"
+    )
 
     block = random_block(rng)
 
@@ -1669,7 +2087,9 @@ def test_cpsat_trajectory_equivalence():
     solver.parameters.max_time_in_seconds = 20.0
     solver.parameters.num_search_workers = 1
 
-    status = solver.Solve(finder.model)
+    status = solver.Solve(
+        finder.model
+    )
 
     assert status in (
         cp_model.OPTIMAL,
@@ -1682,24 +2102,16 @@ def test_cpsat_trajectory_equivalence():
         IV,
     )
 
-    def bits_to_word(bits):
-        value = 0
-
-        for bit, b in enumerate(bits):
-            value |= int(solver.Value(b)) << bit
-
-        return value & MASK32
-
     for r, state in enumerate(concrete):
         modeled = (
-            bits_to_word(Af[r + 3]),
-            bits_to_word(Af[r + 2]),
-            bits_to_word(Af[r + 1]),
-            bits_to_word(Af[r]),
-            bits_to_word(Ef[r + 3]),
-            bits_to_word(Ef[r + 2]),
-            bits_to_word(Ef[r + 1]),
-            bits_to_word(Ef[r]),
+            _bits_value(solver, Af[r + 3]),
+            _bits_value(solver, Af[r + 2]),
+            _bits_value(solver, Af[r + 1]),
+            _bits_value(solver, Af[r]),
+            _bits_value(solver, Ef[r + 3]),
+            _bits_value(solver, Ef[r + 2]),
+            _bits_value(solver, Ef[r + 1]),
+            _bits_value(solver, Ef[r]),
         )
 
         assert modeled == state, (
@@ -1715,33 +2127,53 @@ def run_self_tests():
     print("=" * 78)
 
     assert K[3] == 0xE9B5DBA5
-    print("[PASS] NIST K[3] = 0xE9B5DBA5")
+    print(
+        "[PASS] NIST K[3] = 0xE9B5DBA5"
+    )
 
     test_sha256_abc()
-    print("[PASS] SHA-256 abc matches hashlib")
+    print(
+        "[PASS] SHA-256 abc matches hashlib"
+    )
 
     test_round_inversion()
-    print("[PASS] Exact inversion verified across 40 rounds")
+    print(
+        "[PASS] Exact inversion verified across 40 rounds"
+    )
 
     test_individual_inverse_rounds()
-    print("[PASS] Individual inverse-round checks passed")
+    print(
+        "[PASS] Individual inverse-round checks passed"
+    )
 
     test_sliding_window()
-    print("[PASS] Forward sliding-window coordinates verified")
+    print(
+        "[PASS] Forward sliding-window coordinates verified"
+    )
 
     test_backward_window()
-    print("[PASS] Backward sliding-window reconstruction verified")
+    print(
+        "[PASS] Backward sliding-window reconstruction verified"
+    )
 
     test_random_concrete_rounds()
-    print("[PASS] Randomized concrete regression tests passed")
+    print(
+        "[PASS] Randomized concrete regression tests passed"
+    )
 
     test_cpsat_bit_primitives()
-    print("[PASS] CP-SAT bit primitives match concrete functions")
+    print(
+        "[PASS] CP-SAT bit primitives match concrete functions"
+    )
 
     test_cpsat_trajectory_equivalence()
-    print("[PASS] CP-SAT forward trajectory matches concrete SHA-256")
+    print(
+        "[PASS] CP-SAT forward trajectory matches concrete SHA-256"
+    )
 
-    print("\n[PASS] ALL SELF-TESTS PASSED")
+    print(
+        "\n[PASS] ALL SELF-TESTS PASSED"
+    )
 
 
 # ============================================================================
@@ -1790,9 +2222,17 @@ def run_benchmark(
         f"difference_round={difference_round}"
     )
 
-    print(f"Build time       : {build_time:.3f}s")
-    print(f"Variables        : {stats['variables']:,}")
-    print(f"Constraints      : {stats['constraints']:,}")
+    print(
+        f"Build time       : {build_time:.3f}s"
+    )
+
+    print(
+        f"Variables        : {stats['variables']:,}"
+    )
+
+    print(
+        f"Constraints      : {stats['constraints']:,}"
+    )
 
     return finder.solve(
         timeout_sec=timeout,
@@ -1816,7 +2256,9 @@ def parse_sweep(
             result.append(int(item))
 
     if not result:
-        raise ValueError("Empty sweep.")
+        raise ValueError(
+            "Empty sweep."
+        )
 
     return tuple(result)
 
@@ -1825,209 +2267,3 @@ def run_sweep(
     rounds: int,
     sweep_points: Sequence[int],
     timeout: float,
-    difference_round: int | None = None,
-    workers: int = 4,
-):
-    if difference_round is None:
-        difference_round = (
-            27 if rounds > 27
-            else (rounds // 2 if rounds > 1 else 0)
-        )
-
-    print("=" * 78)
-    print("SHA256SW MEETING-POINT SWEEP")
-    print("=" * 78)
-
-    print(
-        f"Rounds={rounds} | "
-        f"timeout={timeout}s | "
-        f"difference_round={difference_round}"
-    )
-
-    rows = []
-
-    for k in sweep_points:
-        if not 1 <= k < rounds:
-            print(
-                f"\n[skip] k={k}: "
-                f"requires 1 <= k < {rounds}"
-            )
-            continue
-
-        print(
-            f"\n--- k={k:02d} "
-            f"(forward={k}, backward={rounds-k}) ---"
-        )
-
-        finder = CPSATSWFinder(
-            rounds=rounds,
-            meet_k=k,
-            iv=IV,
-            difference_round=difference_round,
-        )
-
-        t0 = time.perf_counter()
-
-        finder.build(
-            active_words_range=(0, 4)
-        )
-
-        build = time.perf_counter() - t0
-        stats = finder.stats()
-
-        result = finder.solve(
-            timeout_sec=timeout,
-            workers=workers,
-        )
-
-        rows.append({
-            "k": k,
-            "build": build,
-            "variables": stats["variables"],
-            "constraints": stats["constraints"],
-            **result,
-        })
-
-    print("\n" + "=" * 78)
-    print("SWEEP SUMMARY")
-    print("=" * 78)
-
-    print(
-        f"{'k':>3} "
-        f"{'build':>8} "
-        f"{'vars':>9} "
-        f"{'constraints':>12} "
-        f"{'time':>9} "
-        f"{'conflicts':>12} "
-        f"{'branches':>12} "
-        f"{'status':>10}"
-    )
-
-    for row in rows:
-        print(
-            f"{row['k']:3d} "
-            f"{row['build']:8.3f} "
-            f"{row['variables']:9,d} "
-            f"{row['constraints']:12,d} "
-            f"{row['elapsed']:9.3f} "
-            f"{row['conflicts']:12,d} "
-            f"{row['branches']:12,d} "
-            f"{row['status']:>10}"
-        )
-
-    return rows
-
-
-# ============================================================================
-# CLI
-# ============================================================================
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "SHA256SW reduced-round sliding-window "
-            "bidirectional CP-SAT research harness."
-        )
-    )
-
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        default=40,
-        help="Number of SHA-256 rounds (default: 40).",
-    )
-
-    parser.add_argument(
-        "--meet-k",
-        type=int,
-        default=None,
-        help="Meeting point k (default: rounds//2).",
-    )
-
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=10.0,
-        help="CP-SAT timeout per instance in seconds.",
-    )
-
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=4,
-        help="CP-SAT search workers.",
-    )
-
-    parser.add_argument(
-        "--difference-round",
-        type=int,
-        default=None,
-        help="Round requiring S_r(M1) != S_r(M2).",
-    )
-
-    parser.add_argument(
-        "--self-test",
-        action="store_true",
-        help="Run all concrete and CP-SAT self-tests.",
-    )
-
-    parser.add_argument(
-        "--sweep",
-        type=str,
-        default=None,
-        help="Comma-separated meeting points, e.g. 8,12,16,20,24,27.",
-    )
-
-    args = parser.parse_args()
-
-    if not 1 <= args.rounds <= 64:
-        parser.error("--rounds must be between 1 and 64.")
-
-    if args.workers < 1:
-        parser.error("--workers must be >= 1.")
-
-    if args.timeout <= 0:
-        parser.error("--timeout must be > 0.")
-
-    if args.self_test:
-        run_self_tests()
-        return
-
-    meet_k = (
-        args.meet_k
-        if args.meet_k is not None
-        else args.rounds // 2
-    )
-
-    if args.rounds == 1:
-        meet_k = 0
-
-    if not 1 <= meet_k < args.rounds:
-        parser.error(
-            f"--meet-k must satisfy 1 <= meet-k < {args.rounds}"
-        )
-
-    if args.sweep is not None:
-        points = parse_sweep(args.sweep)
-
-        run_sweep(
-            rounds=args.rounds,
-            sweep_points=points,
-            timeout=args.timeout,
-            difference_round=args.difference_round,
-            workers=args.workers,
-        )
-
-        return
-
-    run_benchmark(
-        rounds=args.rounds,
-        meet_k=meet_k,
-        timeout=args.timeout,
-        difference_round=args.difference_round,
-        workers=args.workers,
-    )
-
-
-if __name__ == "__main__":
-    main()
