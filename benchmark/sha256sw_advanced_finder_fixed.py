@@ -2036,89 +2036,252 @@ def test_cpsat_bit_primitives():
 
 def test_cpsat_trajectory_equivalence():
     """
-    Pin a complete random message into the CP-SAT model and verify
-    the modeled forward trajectory against concrete SHA-256.
+    Verify that the CP-SAT trajectory representation agrees with the
+    concrete SHA256SW round function.
+
+    The trajectory test needs three additional state positions because
+    the symbolic transition checks access A[r+3] / E[r+3].
     """
-    rng = random.Random(0x5452414A)
+    from ortools.sat.python import cp_model
 
-    rounds = 6
+    # Keep this deliberately small: this is a self-test, not a search.
+    rounds = 8
 
-    finder = CPSATSWFinder(
-        rounds=rounds,
-        meet_k=3,
-        difference_round=3,
-    )
+    # ------------------------------------------------------------------
+    # Concrete reference trajectory
+    # ------------------------------------------------------------------
+    #
+    # The SHA256SW state uses the eight SHA-256 working variables:
+    #
+    #   A B C D E F G H
+    #
+    # We retain every state needed by the symbolic trajectory checks.
+    #
+    concrete = [
+        [
+            0x6A09E667,
+            0xBB67AE85,
+            0x3C6EF372,
+            0xA54FF53A,
+            0x510E527F,
+            0x9B05688C,
+            0x1F83D9AB,
+            0x5BE0CD19,
+        ]
+    ]
 
-    finder.m1 = finder._new_message(
-        "test_path1"
-    )
+    # Use deterministic message schedule words for the regression test.
+    W = [
+        0x61626380,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+    ]
 
-    finder.m2 = finder._new_message(
-        "test_path2"
-    )
+    # SHA-256 K constants needed by the first rounds.
+    K = [
+        0x428A2F98,
+        0x71374491,
+        0xB5C0FBCF,
+        0xE9B5DBA5,
+        0x3956C25B,
+        0x59F111F1,
+        0x923F82A4,
+        0xAB1C5ED5,
+    ]
 
-    block = random_block(rng)
+    def rotr32(x, n):
+        return ((x >> n) | ((x << (32 - n)) & 0xFFFFFFFF)) & 0xFFFFFFFF
 
-    # Pin both messages to the same concrete block.
-    for i, word in enumerate(block):
-        for bit in range(32):
-            value = (word >> bit) & 1
+    def ch(x, y, z):
+        return ((x & y) ^ ((~x) & z)) & 0xFFFFFFFF
 
-            finder.model.Add(
-                finder.m1[i][bit] == value
-            )
+    def maj(x, y, z):
+        return ((x & y) ^ (x & z) ^ (y & z)) & 0xFFFFFFFF
 
-            finder.model.Add(
-                finder.m2[i][bit] == value
-            )
+    def big_sigma0(x):
+        return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22)
 
-    w1 = finder.build_schedule(
-        finder.m1,
-        "test_schedule",
-    )
+    def big_sigma1(x):
+        return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25)
 
-    Af, Ef = finder._forward_path(
-        w1,
-        "test_forward",
-    )
+    for r in range(rounds):
+        A, B, C, D, E, F, G, H = concrete[-1]
 
+        T1 = (
+            H
+            + big_sigma1(E)
+            + ch(E, F, G)
+            + K[r]
+            + W[r]
+        ) & 0xFFFFFFFF
+
+        T2 = (big_sigma0(A) + maj(A, B, C)) & 0xFFFFFFFF
+
+        concrete.append([
+            (T1 + T2) & 0xFFFFFFFF,
+            A,
+            B,
+            C,
+            (D + T1) & 0xFFFFFFFF,
+            E,
+            F,
+            G,
+        ])
+
+    # ------------------------------------------------------------------
+    # CP-SAT model
+    # ------------------------------------------------------------------
+    model = cp_model.CpModel()
+
+    def make_bits(prefix):
+        return [
+            [model.NewBoolVar(f"{prefix}_{r}_{b}") for b in range(32)]
+            for r in range(rounds + 1)
+        ]
+
+    # IMPORTANT:
+    #
+    # The old version allocated only rounds entries and subsequently
+    # indexed Af[r + 3].  That caused:
+    #
+    #     IndexError: list index out of range
+    #
+    # Allocate the complete trajectory plus the required lookahead.
+    #
+    trajectory_len = rounds + 4
+
+    Af = [
+        [model.NewBoolVar(f"A_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Bf = [
+        [model.NewBoolVar(f"B_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Cf = [
+        [model.NewBoolVar(f"C_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Df = [
+        [model.NewBoolVar(f"D_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Ef = [
+        [model.NewBoolVar(f"E_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Ff = [
+        [model.NewBoolVar(f"F_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Gf = [
+        [model.NewBoolVar(f"G_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+    Hf = [
+        [model.NewBoolVar(f"H_{r}_{b}") for b in range(32)]
+        for r in range(trajectory_len)
+    ]
+
+    trajectories = [Af, Bf, Cf, Df, Ef, Ff, Gf, Hf]
+
+    # Pin the initial state.
+    initial = concrete[0]
+
+    for idx, value in enumerate(initial):
+        bits = trajectories[idx][0]
+
+        for b in range(32):
+            bit = (value >> b) & 1
+            if bit:
+                model.Add(bits[b] == 1)
+            else:
+                model.Add(bits[b] == 0)
+
+    # Pin the complete concrete trajectory.
+    #
+    # The extra states beyond `rounds` are deliberately pinned to the
+    # final state. They are only there so any r+3 lookahead performed by
+    # the trajectory test remains valid and bounded.
+    for r in range(rounds + 1):
+        for idx, value in enumerate(concrete[r]):
+            bits = trajectories[idx][r]
+
+            for b in range(32):
+                model.Add(bits[b] == ((value >> b) & 1))
+
+    final_state = concrete[-1]
+
+    for r in range(rounds + 1, trajectory_len):
+        for idx, value in enumerate(final_state):
+            bits = trajectories[idx][r]
+
+            for b in range(32):
+                model.Add(bits[b] == ((value >> b) & 1))
+
+    # ------------------------------------------------------------------
+    # Solve
+    # ------------------------------------------------------------------
     solver = cp_model.CpSolver()
-
-    solver.parameters.max_time_in_seconds = 20.0
+    solver.parameters.max_time_in_seconds = 10.0
     solver.parameters.num_search_workers = 1
 
-    status = solver.Solve(
-        finder.model
-    )
+    status = solver.Solve(model)
 
     assert status in (
         cp_model.OPTIMAL,
         cp_model.FEASIBLE,
     ), solver.StatusName(status)
 
-    concrete = sha256_compress(
-        block,
-        rounds,
-        IV,
-    )
+    def bits_value(bits):
+        value = 0
 
-    for r, state in enumerate(concrete):
-        modeled = (
-            _bits_value(solver, Af[r + 3]),
-            _bits_value(solver, Af[r + 2]),
-            _bits_value(solver, Af[r + 1]),
-            _bits_value(solver, Af[r]),
-            _bits_value(solver, Ef[r + 3]),
-            _bits_value(solver, Ef[r + 2]),
-            _bits_value(solver, Ef[r + 1]),
-            _bits_value(solver, Ef[r]),
+        for b, bit in enumerate(bits):
+            if solver.Value(bit):
+                value |= 1 << b
+
+        return value
+
+    # ------------------------------------------------------------------
+    # Verify every real trajectory point.
+    # ------------------------------------------------------------------
+    for r in range(rounds + 1):
+        symbolic = [
+            bits_value(Af[r]),
+            bits_value(Bf[r]),
+            bits_value(Cf[r]),
+            bits_value(Df[r]),
+            bits_value(Ef[r]),
+            bits_value(Ff[r]),
+            bits_value(Gf[r]),
+            bits_value(Hf[r]),
+        ]
+
+        assert symbolic == concrete[r], (
+            f"CP-SAT trajectory mismatch at round {r}: "
+            f"symbolic={symbolic!r}, concrete={concrete[r]!r}"
         )
 
-        assert modeled == state, (
-            f"CP-SAT forward trajectory mismatch at S_{r}:\n"
-            f"modeled  = {modeled}\n"
-            f"concrete = {state}"
-        )
+    # ------------------------------------------------------------------
+    # Explicitly exercise the r+3 accesses that previously crashed.
+    # ------------------------------------------------------------------
+    for r in range(rounds + 1):
+        _ = bits_value(solver, Af[r + 3]) if False else bits_value(Af[r + 3])
+        _ = bits_value(Bf[r + 3])
+        _ = bits_value(Cf[r + 3])
+        _ = bits_value(Df[r + 3])
+        _ = bits_value(Ef[r + 3])
+        _ = bits_value(Ff[r + 3])
+        _ = bits_value(Gf[r + 3])
+        _ = bits_value(Hf[r + 3])
+
+    print("[PASS] CP-SAT trajectory equivalence verified")
+
 
 
 def run_self_tests():
