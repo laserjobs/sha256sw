@@ -322,7 +322,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install ortools
 
-      - name: Verify installation
+      - name: Verify OR-Tools
         run: |
           python3 --version
           python3 -c "from ortools.sat.python import cp_model; print('OR-Tools import: OK')"
@@ -342,108 +342,164 @@ jobs:
       # ----------------------------------------------------------------------
 
       - name: Run SHA256SW self-tests
+        shell: bash
         run: |
           set -o pipefail
 
-          python3 benchmark/sha256sw_advanced_finder_fixed.py \
+          echo "============================================================"
+          echo "SHA256SW SELF-TEST"
+          echo "============================================================"
+
+          python3 -u benchmark/sha256sw_advanced_finder_fixed.py \
             --self-test \
-            | tee sha256sw_selftest.txt
+            2>&1 | tee sha256sw_selftest.txt
+
+          status=${PIPESTATUS[0]}
+
+          echo
+          echo "SHA256SW self-test exit status: ${status}"
+
+          exit "${status}"
 
       # ----------------------------------------------------------------------
       # CP-SAT SMOKE TEST
       # ----------------------------------------------------------------------
 
       - name: Run CP-SAT smoke test
+        shell: bash
         run: |
           set -o pipefail
 
-          python3 benchmark/sha256sw_advanced_finder_fixed.py \
+          echo "============================================================"
+          echo "SHA256SW CP-SAT SMOKE TEST"
+          echo "============================================================"
+
+          python3 -u benchmark/sha256sw_advanced_finder_fixed.py \
             --rounds 4 \
             --meet-k 2 \
             --timeout 5 \
             --workers 2 \
             2>&1 | tee sha256sw_smoke.txt
 
+          status=${PIPESTATUS[0]}
+
+          echo
+          echo "CP-SAT smoke-test exit status: ${status}"
+
+          exit "${status}"
+
       # ----------------------------------------------------------------------
       # MEETING-POINT SWEEP
       # ----------------------------------------------------------------------
 
-      - name: Run meeting-point sweep
+      - name: Run SHA256SW meeting-point sweep
+        shell: bash
         run: |
           set -o pipefail
 
-          python3 benchmark/sha256sw_advanced_finder_fixed.py \
+          echo
+          echo "============================================================"
+          echo "SHA256SW CP-SAT MEETING-POINT SWEEP"
+          echo "============================================================"
+          echo
+          echo "Starting sweep..."
+          echo
+
+          python3 -u benchmark/sha256sw_advanced_finder_fixed.py \
             --rounds 6 \
             --sweep 1,2,3,4,5 \
             --timeout 5 \
             --workers 2 \
             2>&1 | tee sha256sw_sweep.txt
 
+          status=${PIPESTATUS[0]}
+
+          echo
+          echo "============================================================"
+          echo "SHA256SW SWEEP COMPLETE"
+          echo "============================================================"
+          echo "Python exit status: ${status}"
+          echo
+
+          if [ ! -s sha256sw_sweep.txt ]; then
+            echo "ERROR: SHA256SW produced no captured output."
+            echo
+            echo "The program completed without writing anything to stdout/stderr."
+            echo "This is considered a CI failure because no research result"
+            echo "was reported."
+            exit 1
+          fi
+
+          echo "Captured SHA256SW output:"
+          echo "------------------------------------------------------------"
+          cat sha256sw_sweep.txt
+          echo "------------------------------------------------------------"
+
+          exit "${status}"
+
       # ----------------------------------------------------------------------
-      # EXTRACT RESULTS
-      #
-      # This makes the CI useful even if the Python program itself does not
-      # produce much terminal output.
+      # PUBLISH RESULTS TO GITHUB SUMMARY
       # ----------------------------------------------------------------------
 
-      - name: Analyze SHA256SW output
+      - name: Publish SHA256SW research results
+        if: always()
         shell: bash
         run: |
-          set -euo pipefail
-
           {
             echo "# SHA256SW CP-SAT Research"
             echo
-            echo "## Status"
+            echo "## Meeting-point sweep"
             echo
-            echo "✅ Self-tests completed successfully."
-            echo "✅ CP-SAT smoke test completed successfully."
-            echo "✅ Meeting-point sweep completed successfully."
+            echo "**Commit:** \`${GITHUB_SHA}\`"
             echo
-            echo "## Environment"
+            echo "**Python:** \`$(python3 --version)\`"
             echo
-            echo "| Item | Value |"
-            echo "|---|---|"
-            echo "| Commit | \`${GITHUB_SHA}\` |"
-            echo "| Branch | \`${GITHUB_REF_NAME}\` |"
-            echo "| Python | \`$(python3 --version)\` |"
-            echo "| OR-Tools | \`$(python3 -c 'import ortools; print(ortools.__version__)')\` |"
-            echo "| CPU cores | \`$(nproc)\` |"
+            echo "**OR-Tools:** \`$(python3 -c 'import ortools; print(ortools.__version__)')\`"
             echo
-            echo "## Self-test output"
+            echo "**CPU cores:** \`$(nproc)\`"
+            echo
+            echo "### Sweep output"
             echo
             echo '```text'
-            cat sha256sw_selftest.txt
-            echo '```'
-            echo
-            echo "## CP-SAT smoke-test output"
-            echo
-            echo '```text'
-            if [ -s sha256sw_smoke.txt ]; then
-              cat sha256sw_smoke.txt
-            else
-              echo "(No stdout was produced by the solver.)"
-            fi
-            echo '```'
-            echo
-            echo "## Meeting-point sweep output"
-            echo
-            echo '```text'
+
             if [ -s sha256sw_sweep.txt ]; then
               cat sha256sw_sweep.txt
             else
-              echo "(No stdout was produced by the sweep.)"
+              echo "ERROR: No SHA256SW sweep output was captured."
             fi
+
             echo '```'
-          } > sha256sw_summary.md
+            echo
+            echo "### Smoke-test output"
+            echo
+            echo '```text'
 
-          cat sha256sw_summary.md >> "$GITHUB_STEP_SUMMARY"
+            if [ -s sha256sw_smoke.txt ]; then
+              cat sha256sw_smoke.txt
+            else
+              echo "No smoke-test output captured."
+            fi
+
+            echo '```'
+            echo
+            echo "### Self-test output"
+            echo
+            echo '```text'
+
+            if [ -s sha256sw_selftest.txt ]; then
+              cat sha256sw_selftest.txt
+            else
+              echo "No self-test output captured."
+            fi
+
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ----------------------------------------------------------------------
-      # SHOW RAW OUTPUT DIRECTLY IN ACTION LOG
+      # PRINT RESULTS AGAIN IN ACTION LOG
       # ----------------------------------------------------------------------
 
-      - name: Print SHA256SW research results
+      - name: Print SHA256SW results
         if: always()
         shell: bash
         run: |
@@ -461,7 +517,7 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "SHA256SW MEETING-POINT SWEEP OUTPUT"
+          echo "SHA256SW CP-SAT SWEEP OUTPUT"
           echo "============================================================"
           cat sha256sw_sweep.txt 2>/dev/null || true
 
@@ -469,7 +525,9 @@ jobs:
       # ENVIRONMENT INFORMATION
       # ----------------------------------------------------------------------
 
-      - name: Collect research metadata
+      - name: Collect SHA256SW research metadata
+        if: always()
+        shell: bash
         run: |
           {
             echo "SHA256SW CP-SAT Research Run"
@@ -494,7 +552,7 @@ jobs:
           } | tee sha256sw_environment.txt
 
       # ----------------------------------------------------------------------
-      # UPLOAD EVERYTHING
+      # UPLOAD RESULTS
       # ----------------------------------------------------------------------
 
       - name: Upload SHA256SW research results
@@ -506,7 +564,6 @@ jobs:
             sha256sw_selftest.txt
             sha256sw_smoke.txt
             sha256sw_sweep.txt
-            sha256sw_summary.md
             sha256sw_environment.txt
           if-no-files-found: warn
 
