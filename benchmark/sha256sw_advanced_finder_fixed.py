@@ -459,20 +459,42 @@ class CPSATSWFinder:
     # Boolean / arithmetic primitives
     # ----------------------------------------------------------------------
 
-    def _add_u32(
+        def _add_u32(
         self,
         addends: Sequence[BitVector],
         prefix: str,
     ) -> BitVector:
+        """
+        Ripple-carry addition of arbitrary 32-bit vectors modulo 2^32.
+
+        Each input word is represented little-endian by bit index.
+
+        For n one-bit operands, the carry into a bit can be as large as
+        n - 1.  The carry bound therefore uses n - 1 rather than n // 2.
+
+        Example:
+            adding three 1-bit values with an incoming carry of 1 can
+            produce 4, requiring an outgoing carry of 2.
+
+        The final carry beyond bit 31 is intentionally discarded because
+        SHA-256 arithmetic is modulo 2^32.
+        """
         if not addends:
             raise ValueError("At least one addend is required.")
 
         out: BitVector = []
 
-        # For n one-bit operands plus a carry-in, the maximum carry into
-        # the next bit is floor(n / 2).  This is much tighter than using n.
         n = len(addends)
-        carry_max = n // 2
+
+        # Maximum stable carry for n binary addends is n - 1.
+        #
+        # For example, with three addends:
+        #
+        #   1 + 1 + 1 + carry(1) = 4
+        #
+        # so carry_out can be 2.
+        carry_max = max(0, n - 1)
+
         carry = 0
 
         for bit in range(32):
@@ -495,6 +517,7 @@ class CPSATSWFinder:
             carry = carry_out
 
         return out
+
 
     def _sub_u32(
         self,
