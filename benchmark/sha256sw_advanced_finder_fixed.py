@@ -2267,99 +2267,479 @@ def run_sweep(
     rounds: int,
     sweep_points: Sequence[int],
     timeout: float,
-        difference_round: int | None = None,
+    difference_round: int | None = None,
     workers: int = 4,
 ):
+    """
+    Run the CP-SAT SHA256SW meeting-point sweep and report every result.
+
+    This function deliberately prints progress before and after every solver
+    invocation so CI logs remain useful even when CP-SAT returns quickly,
+    times out, or finds no feasible witness.
+    """
+
     if difference_round is None:
         difference_round = (
             27
             if rounds > 27
-            else (rounds // 2 if rounds > 1 else None)
+            else (rounds // 2 if rounds > 1 else 0)
         )
 
-    print("=" * 78)
-    print("SHA256SW MEETING-POINT SWEEP")
-    print("=" * 78)
+    points = tuple(sweep_points)
 
+    print("=" * 78, flush=True)
+    print("SHA256SW CP-SAT MEETING-POINT SWEEP", flush=True)
+    print("=" * 78, flush=True)
+    print(flush=True)
+
+    print(f"Rounds:       {rounds}", flush=True)
     print(
-        f"Rounds={rounds} | "
-        f"timeout={timeout}s | "
-        f"difference_round={difference_round}"
+        f"Sweep points: {', '.join(str(k) for k in points)}",
+        flush=True,
     )
+    print(f"Timeout:      {timeout}s", flush=True)
+    print(f"Workers:      {workers}", flush=True)
+    print(
+        f"Difference:   S_{difference_round}",
+        flush=True,
+    )
+    print(flush=True)
+    print("Starting sweep...", flush=True)
+    print(flush=True)
 
     rows = []
+    valid_points = 0
 
-    for k in sweep_points:
+    for index, k in enumerate(points, start=1):
         if not 1 <= k < rounds:
             print(
-                f"\n[skip] k={k}: "
-                f"requires 1 <= k < {rounds}"
+                f"[{index}/{len(points)}] meet-k={k}: SKIPPED "
+                f"(requires 1 <= k < {rounds})",
+                flush=True,
             )
             continue
 
+        valid_points += 1
+
         print(
-            f"\n--- k={k:02d} "
-            f"(forward={k}, backward={rounds-k}) ---"
+            f"[{index}/{len(points)}] meet-k={k}",
+            flush=True,
+        )
+        print(
+            f"    forward={k}, backward={rounds - k}",
+            flush=True,
+        )
+        print(
+            "    building CP-SAT model...",
+            flush=True,
         )
 
-        finder = CPSATSWFinder(
-            rounds=rounds,
-            meet_k=k,
-            iv=IV,
-            difference_round=difference_round,
+        try:
+            finder = CPSATSWFinder(
+                rounds=rounds,
+                meet_k=k,
+                iv=IV,
+                difference_round=difference_round,
+            )
+
+            build_start = time.perf_counter()
+
+            finder.build(
+                active_words_range=(0, 4)
+            )
+
+            build_time = time.perf_counter() - build_start
+
+            proto = finder.model.Proto()
+
+            variables = len(proto.variables)
+            constraints = len(proto.constraints)
+
+            print(
+                f"    build time={build_time:.3f}s",
+                flush=True,
+            )
+            print(
+                f"    variables={variables:,}",
+                flush=True,
+            )
+            print(
+                f"    constraints={constraints:,}",
+                flush=True,
+            )
+            print(
+                "    solving...",
+                flush=True,
+            )
+
+            solve_start = time.perf_counter()
+
+            result = finder.solve(
+                timeout_sec=timeout,
+                workers=workers,
+            )
+
+            solve_time = time.perf_counter() - solve_start
+
+            if not isinstance(result, dict):
+                result = {
+                    "status": str(result),
+                    "elapsed": solve_time,
+                    "conflicts": 0,
+                    "branches": 0,
+                    "valid": False,
+                }
+
+            status = str(
+                result.get("status", "UNKNOWN")
+            )
+
+            elapsed = float(
+                result.get("elapsed", solve_time)
+            )
+
+            conflicts = int(
+                result.get("conflicts", 0)
+            )
+
+            branches = int(
+                result.get("branches", 0)
+            )
+
+            valid = bool(
+                result.get("valid", False)
+            )
+
+            row = {
+                "index": index,
+                "k": k,
+                "build": build_time,
+                "variables": variables,
+                "constraints": constraints,
+                "elapsed": elapsed,
+                "conflicts": conflicts,
+                "branches": branches,
+                "status": status,
+                "valid": valid,
+                **result,
+            }
+
+            rows.append(row)
+
+            print(
+                f"    status={status}",
+                flush=True,
+            )
+            print(
+                f"    elapsed={elapsed:.3f}s",
+                flush=True,
+            )
+            print(
+                f"    conflicts={conflicts:,}",
+                flush=True,
+            )
+            print(
+                f"    branches={branches:,}",
+                flush=True,
+            )
+            print(
+                f"    valid_witness={valid}",
+                flush=True,
+            )
+
+            if valid:
+                print(
+                    "    *** VALID WITNESS FOUND ***",
+                    flush=True,
+                )
+
+                m1 = result.get("m1")
+                m2 = result.get("m2")
+
+                if m1 is not None:
+                    print(
+                        "    M1:",
+                        " ".join(
+                            f"{x:08x}"
+                            for x in m1
+                        ),
+                        flush=True,
+                    )
+
+                if m2 is not None:
+                    print(
+                        "    M2:",
+                        " ".join(
+                            f"{x:08x}"
+                            for x in m2
+                        ),
+                        flush=True,
+                    )
+
+            print(flush=True)
+
+        except Exception as exc:
+            print(
+                f"    ERROR: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            rows.append(
+                {
+                    "index": index,
+                    "k": k,
+                    "build": 0.0,
+                    "variables": 0,
+                    "constraints": 0,
+                    "elapsed": 0.0,
+                    "conflicts": 0,
+                    "branches": 0,
+                    "status": "ERROR",
+                    "valid": False,
+                    "error": str(exc),
+                }
+            )
+
+            print(flush=True)
+
+    print("=" * 78, flush=True)
+    print("SHA256SW SWEEP COMPLETE", flush=True)
+    print("=" * 78, flush=True)
+    print(flush=True)
+
+    if not rows:
+        print(
+            "WARNING: no valid sweep points were executed.",
+            flush=True,
         )
+        return rows
 
-        t0 = time.perf_counter()
-
-        finder.build(
-            active_words_range=(0, 4)
-        )
-
-        build = time.perf_counter() - t0
-
-        proto = finder.model.Proto()
-
-        result = finder.solve(
-            timeout_sec=timeout,
-            workers=workers,
-        )
-
-        row = {
-            "k": k,
-            "build": build,
-            "variables": len(proto.variables),
-            "constraints": len(proto.constraints),
-            **result,
-        }
-
-        rows.append(row)
-
-    print("\n" + "=" * 78)
-    print("SWEEP SUMMARY")
-    print("=" * 78)
+    print("Results:", flush=True)
+    print(flush=True)
 
     print(
-        f"{'k':>3} "
-        f"{'build':>8} "
-        f"{'vars':>9} "
-        f"{'constraints':>12} "
+        f"{'k':>4} "
+        f"{'build':>9} "
+        f"{'vars':>10} "
+        f"{'constraints':>13} "
         f"{'time':>9} "
         f"{'conflicts':>12} "
         f"{'branches':>12} "
-        f"{'status':>10}"
+        f"{'status':>12} "
+        f"{'valid':>7}",
+        flush=True,
+    )
+
+    print(
+        "-" * 98,
+        flush=True,
     )
 
     for row in rows:
         print(
-            f"{row['k']:3d} "
-            f"{row['build']:8.3f} "
-            f"{row['variables']:9,d} "
-            f"{row['constraints']:12,d} "
+            f"{row['k']:4d} "
+            f"{row['build']:9.3f} "
+            f"{row['variables']:10,d} "
+            f"{row['constraints']:13,d} "
             f"{row['elapsed']:9.3f} "
             f"{row['conflicts']:12,d} "
             f"{row['branches']:12,d} "
-            f"{row['status']:>10}"
+            f"{row['status']:>12} "
+            f"{str(row['valid']):>7}",
+            flush=True,
         )
+
+    print(flush=True)
+
+    valid_rows = [
+        row
+        for row in rows
+        if row.get("valid") is True
+    ]
+
+    error_rows = [
+        row
+        for row in rows
+        if row.get("status") == "ERROR"
+    ]
+
+    if valid_rows:
+        print(
+            f"VALID WITNESSES: {len(valid_rows)}",
+            flush=True,
+        )
+
+        for row in valid_rows:
+            print(
+                f"  meet-k={row['k']} "
+                f"status={row['status']} "
+                f"time={row['elapsed']:.3f}s",
+                flush=True,
+            )
+    else:
+        print(
+            "No independently verified collision witness was found.",
+            flush=True,
+        )
+
+    if error_rows:
+        print(
+            f"Solver/model errors: {len(error_rows)}",
+            flush=True,
+        )
+
+    print(flush=True)
 
     return rows
 
+
+# ============================================================================
+# COMMAND LINE INTERFACE
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "SHA256SW reduced-round CP-SAT research harness"
+        )
+    )
+
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run all self-tests and exit",
+    )
+
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=40,
+        help="number of SHA-256 rounds",
+    )
+
+    parser.add_argument(
+        "--meet-k",
+        type=int,
+        default=None,
+        help="forward/backward meeting point",
+    )
+
+    parser.add_argument(
+        "--sweep",
+        type=str,
+        default=None,
+        help="comma-separated meeting points",
+    )
+
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="CP-SAT timeout per search",
+    )
+
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="CP-SAT worker count",
+    )
+
+    parser.add_argument(
+        "--difference-round",
+        type=int,
+        default=None,
+        help="round at which the two paths must differ",
+    )
+
+    args = parser.parse_args()
+
+    if args.rounds < 1 or args.rounds > 64:
+        parser.error(
+            "--rounds must be between 1 and 64"
+        )
+
+    if args.timeout <= 0:
+        parser.error(
+            "--timeout must be positive"
+        )
+
+    if args.workers < 1:
+        parser.error(
+            "--workers must be at least 1"
+        )
+
+    if args.self_test:
+        run_self_tests()
+        return 0
+
+    if args.sweep is not None:
+        try:
+            sweep_points = parse_sweep(args.sweep)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        rows = run_sweep(
+            rounds=args.rounds,
+            sweep_points=sweep_points,
+            timeout=args.timeout,
+            difference_round=args.difference_round,
+            workers=args.workers,
+        )
+
+        if not rows:
+            print(
+                "ERROR: sweep executed zero valid points.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+
+        if any(
+            row.get("status") == "ERROR"
+            for row in rows
+        ):
+            return 1
+
+        return 0
+
+    if args.meet_k is None:
+        parser.error(
+            "specify either --meet-k or --sweep"
+        )
+
+    if not 1 <= args.meet_k < args.rounds:
+        parser.error(
+            f"--meet-k must satisfy "
+            f"1 <= meet-k < {args.rounds}"
+        )
+
+    result = run_benchmark(
+        rounds=args.rounds,
+        meet_k=args.meet_k,
+        timeout=args.timeout,
+        difference_round=args.difference_round,
+        workers=args.workers,
+    )
+
+    if isinstance(result, dict):
+        if result.get("valid"):
+            return 0
+
+        status = str(
+            result.get("status", "")
+        ).upper()
+
+        if status in {
+            "INFEASIBLE",
+            "UNKNOWN",
+            "MODEL_INVALID",
+        }:
+            return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
