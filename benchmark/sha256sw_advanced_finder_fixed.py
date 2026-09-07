@@ -2267,3 +2267,99 @@ def run_sweep(
     rounds: int,
     sweep_points: Sequence[int],
     timeout: float,
+        difference_round: int | None = None,
+    workers: int = 4,
+):
+    if difference_round is None:
+        difference_round = (
+            27
+            if rounds > 27
+            else (rounds // 2 if rounds > 1 else None)
+        )
+
+    print("=" * 78)
+    print("SHA256SW MEETING-POINT SWEEP")
+    print("=" * 78)
+
+    print(
+        f"Rounds={rounds} | "
+        f"timeout={timeout}s | "
+        f"difference_round={difference_round}"
+    )
+
+    rows = []
+
+    for k in sweep_points:
+        if not 1 <= k < rounds:
+            print(
+                f"\n[skip] k={k}: "
+                f"requires 1 <= k < {rounds}"
+            )
+            continue
+
+        print(
+            f"\n--- k={k:02d} "
+            f"(forward={k}, backward={rounds-k}) ---"
+        )
+
+        finder = CPSATSWFinder(
+            rounds=rounds,
+            meet_k=k,
+            iv=IV,
+            difference_round=difference_round,
+        )
+
+        t0 = time.perf_counter()
+
+        finder.build(
+            active_words_range=(0, 4)
+        )
+
+        build = time.perf_counter() - t0
+
+        proto = finder.model.Proto()
+
+        result = finder.solve(
+            timeout_sec=timeout,
+            workers=workers,
+        )
+
+        row = {
+            "k": k,
+            "build": build,
+            "variables": len(proto.variables),
+            "constraints": len(proto.constraints),
+            **result,
+        }
+
+        rows.append(row)
+
+    print("\n" + "=" * 78)
+    print("SWEEP SUMMARY")
+    print("=" * 78)
+
+    print(
+        f"{'k':>3} "
+        f"{'build':>8} "
+        f"{'vars':>9} "
+        f"{'constraints':>12} "
+        f"{'time':>9} "
+        f"{'conflicts':>12} "
+        f"{'branches':>12} "
+        f"{'status':>10}"
+    )
+
+    for row in rows:
+        print(
+            f"{row['k']:3d} "
+            f"{row['build']:8.3f} "
+            f"{row['variables']:9,d} "
+            f"{row['constraints']:12,d} "
+            f"{row['elapsed']:9.3f} "
+            f"{row['conflicts']:12,d} "
+            f"{row['branches']:12,d} "
+            f"{row['status']:>10}"
+        )
+
+    return rows
+
