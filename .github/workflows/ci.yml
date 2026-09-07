@@ -32,7 +32,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install system dependencies
         run: |
@@ -76,7 +76,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install Z3
         run: |
@@ -129,7 +129,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install Z3
         run: |
@@ -292,7 +292,7 @@ jobs:
   # SHA256SW CP-SAT RESEARCH
   # ==========================================================================
 
-  sha256sw-cpsat:
+    sha256sw-cpsat:
     name: SHA256SW CP-SAT Research
     runs-on: ubuntu-latest
     needs: formal
@@ -305,14 +305,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install OR-Tools
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install ortools
 
-      - name: Verify OR-Tools installation
+      - name: Verify installation
         run: |
           python3 --version
           python3 -c "from ortools.sat.python import cp_model; print('OR-Tools import: OK')"
@@ -337,15 +337,86 @@ jobs:
             --rounds 4 \
             --meet-k 2 \
             --timeout 5 \
-            --workers 2
+            --workers 2 \
+            | tee sha256sw_smoke.txt
 
       - name: Run meeting-point sweep
         run: |
+          set -o pipefail
+
           python3 benchmark/sha256sw_advanced_finder_fixed.py \
             --rounds 6 \
             --sweep 1,2,3,4,5 \
             --timeout 5 \
-            --workers 2
+            --workers 2 \
+            | tee sha256sw_sweep.txt
+
+      - name: Collect research metadata
+        run: |
+          {
+            echo "SHA256SW CP-SAT Research Run"
+            echo "================================"
+            echo
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Commit:     $GITHUB_SHA"
+            echo "Branch:     $GITHUB_REF_NAME"
+            echo "Runner:     $RUNNER_OS"
+            echo
+            echo "Python:"
+            python3 --version
+            echo
+            echo "OR-Tools:"
+            python3 -c "import ortools; print(ortools.__version__)"
+            echo
+            echo "CPU:"
+            nproc
+            echo
+            echo "Timestamp:"
+            date -u +"%Y-%m-%dT%H:%M:%SZ"
+          } | tee sha256sw_environment.txt
+
+      - name: Build research summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "# SHA256SW CP-SAT Research"
+            echo
+            echo "## Run"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Python: \`$(python3 --version)\`"
+            echo "- OR-Tools: \`$(python3 -c 'import ortools; print(ortools.__version__)')\`"
+            echo "- CPU cores: \`$(nproc)\`"
+            echo
+            echo "## Meeting-point sweep"
+            echo
+            echo '```text'
+            cat sha256sw_sweep.txt
+            echo '```'
+            echo
+            echo "## CP-SAT smoke test"
+            echo
+            echo '```text'
+            cat sha256sw_smoke.txt
+            echo '```'
+          } > sha256sw_summary.md
+
+          cat sha256sw_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SHA256SW research results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sha256sw-cpsat-${{ github.run_number }}
+          path: |
+            sha256sw_summary.md
+            sha256sw_environment.txt
+            sha256sw_smoke.txt
+            sha256sw_sweep.txt
+          if-no-files-found: warn
+
 
 
   # ==========================================================================
@@ -365,7 +436,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install Z3
         run: |
@@ -427,7 +498,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install Z3
         run: |
