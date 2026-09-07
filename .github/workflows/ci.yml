@@ -16,10 +16,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
-  test:
+  # --------------------------------------------------------------------------
+  # Native C implementation
+  # --------------------------------------------------------------------------
+  c-tests:
     name: C tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -28,7 +36,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Install system dependencies
         run: |
@@ -38,28 +46,26 @@ jobs:
             z3 \
             libz3-dev
 
-      - name: Install Python dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install z3-solver
-
       - name: Show tool versions
         run: |
           python3 --version
-          python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
-          z3 --version
           cc --version
           make --version
+          z3 --version
 
       - name: Build and run C test suite
         run: |
           make test
 
 
+  # --------------------------------------------------------------------------
+  # Formal SMT verification
+  # --------------------------------------------------------------------------
   formal:
     name: Formal verification
     runs-on: ubuntu-latest
-    needs: test
+    needs: c-tests
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -68,20 +74,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
-
-          python3 -m pip install --upgrade pip
-          python3 -m pip install z3-solver
+          sudo apt-get install -y z3 libz3-dev
 
       - name: Verify Z3
         run: |
           z3 --version
-          python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
       - name: Run formal verification
         run: |
@@ -103,9 +105,19 @@ jobs:
           echo "Generated SMT files:"
           printf '  %s\n' "${files[@]}"
 
+          echo
+          echo "SMT artifact sizes:"
+          wc -c "${files[@]}"
 
+
+  # --------------------------------------------------------------------------
+  # Z3 collision research harness
+  #
+  # This is intentionally exploratory.  A timeout/unknown result does not
+  # fail CI; an actual program error or a failed independent verification does.
+  # --------------------------------------------------------------------------
   collision-finder:
-    name: Collision Finder Research
+    name: Collision finder research
     runs-on: ubuntu-latest
     needs: formal
     timeout-minutes: 20
@@ -117,18 +129,19 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y z3 libz3-dev
 
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
-      - name: Verify Z3 installation
+      - name: Verify tools
         run: |
+          python3 --version
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
@@ -138,7 +151,8 @@ jobs:
 
       - name: Python syntax check
         run: |
-          python3 -m py_compile benchmark/collision_finder.py
+          python3 -m py_compile \
+            benchmark/collision_finder.py
 
       - name: Run collision finder self-test
         run: |
@@ -146,7 +160,21 @@ jobs:
             --solver z3 \
             --self-test
 
+      - name: Verify known 39-round construction
+        run: |
+          python3 - <<'PY'
+          import sys
+          from benchmark.collision_finder import verify_known_39_collision
+
+          if not verify_known_39_collision():
+              print("ERROR: known 39-round construction failed")
+              sys.exit(1)
+
+          print("Known 39-round construction verified.")
+          PY
+
       - name: Run reduced-round collision search
+        shell: bash
         run: |
           set +e
 
@@ -160,33 +188,29 @@ jobs:
 
           echo "Reduced-round solver exit status: ${status}"
 
-          if [ "${status}" -eq 0 ]; then
-            echo "Collision search succeeded."
-          elif [ "${status}" -eq 1 ]; then
-            echo "No collision under the supplied constraints."
-          elif [ "${status}" -eq 2 ]; then
-            echo "Solver returned unknown/timeout."
-          else
-            echo "Collision finder encountered an actual error."
-            exit "${status}"
-          fi
+          case "${status}" in
+            0)
+              echo "Collision found and independently verified."
+              ;;
+            1)
+              echo "No collision under the supplied constraints."
+              ;;
+            2)
+              echo "Solver returned unknown/timeout."
+              ;;
+            3)
+              echo "ERROR: solver candidate failed independent verification."
+              exit 3
+              ;;
+            *)
+              echo "ERROR: unexpected collision finder exit status."
+              exit "${status}"
+              ;;
+          esac
 
           exit 0
 
-      - name: Run 39-round known construction verification
-        run: |
-          python3 - <<'PY'
-          import sys
-          from benchmark.collision_finder import verify_known_39_collision
-
-          if not verify_known_39_collision():
-              print("ERROR: known 39-round construction failed")
-              sys.exit(1)
-
-          print("Known 39-round construction verified.")
-          PY
-
-      - name: Run 16-round differential-window experiment
+      - name: Run differential-window experiment
         shell: bash
         run: |
           set +e
@@ -214,28 +238,17 @@ jobs:
               echo "Differential-window search timed out / returned unknown."
               echo "This is an exploratory benchmark result, not a CI failure."
               ;;
+            3)
+              echo "ERROR: solver candidate failed independent verification."
+              exit 3
+              ;;
             *)
-              echo "Unexpected collision finder failure."
+              echo "ERROR: unexpected collision finder failure."
               exit "${status}"
               ;;
           esac
 
           exit 0
-
-      - name: Verify generated SMT exports
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -s reduced_round_collision.smt2 ]; then
-            echo "Reduced-round SMT export:"
-            wc -c reduced_round_collision.smt2
-          fi
-
-          if [ -s collision_window.smt2 ]; then
-            echo "Differential-window SMT export:"
-            wc -c collision_window.smt2
-          fi
 
       - name: Run Floyd O(1)-memory research test
         shell: bash
@@ -253,16 +266,37 @@ jobs:
 
           echo "Floyd exit status: ${status}"
 
-          if [ "${status}" -eq 0 ]; then
-            echo "Cycle detected."
-          elif [ "${status}" -eq 1 ]; then
-            echo "No cycle within iteration budget."
-          else
-            echo "Floyd finder failed."
-            exit "${status}"
-          fi
+          case "${status}" in
+            0)
+              echo "Cycle detected."
+              ;;
+            1)
+              echo "No cycle within iteration budget."
+              ;;
+            *)
+              echo "ERROR: Floyd finder failed."
+              exit "${status}"
+              ;;
+          esac
 
           exit 0
+
+      - name: Verify generated SMT exports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for file in \
+            reduced_round_collision.smt2 \
+            collision_window.smt2
+          do
+            if [ -s "${file}" ]; then
+              echo "Generated ${file}:"
+              wc -c "${file}"
+            else
+              echo "${file}: not generated"
+            fi
+          done
 
       - name: Upload collision finder artifacts
         if: always()
@@ -275,6 +309,9 @@ jobs:
           if-no-files-found: warn
 
 
+  # --------------------------------------------------------------------------
+  # Standard-vs-sliding-window symbolic equivalence
+  # --------------------------------------------------------------------------
   benchmark-equivalence:
     name: Symbolic equivalence benchmark
     runs-on: ubuntu-latest
@@ -288,12 +325,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y z3 libz3-dev
 
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
@@ -303,7 +340,7 @@ jobs:
           z3 --version
           python3 -c "import z3; print('Z3 Python:', z3.get_version_string())"
 
-      - name: Run Python syntax check
+      - name: Python syntax check
         run: |
           python3 -m py_compile \
             benchmark/sha256_representation_benchmark.py
@@ -333,8 +370,11 @@ jobs:
           if-no-files-found: warn
 
 
+  # --------------------------------------------------------------------------
+  # Reduced-round representation/collision benchmark
+  # --------------------------------------------------------------------------
   benchmark-collision:
-    name: Reduced-round Collision Benchmark
+    name: Reduced-round collision benchmark
     runs-on: ubuntu-latest
     needs: formal
     timeout-minutes: 10
@@ -346,12 +386,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Install Z3
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3
+          sudo apt-get install -y z3 libz3-dev
 
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
@@ -379,8 +419,153 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: sha256sw-benchmark-results
+          name: sha256sw-collision-results
           path: |
             sha256sw_benchmark.json
             sha256sw_benchmark.csv
           if-no-files-found: warn
+
+
+  # --------------------------------------------------------------------------
+  # CP-SAT sliding-window research harness
+  #
+  # This specifically covers:
+  #   benchmark/sha256sw_advanced_finder_fixed.py
+  #
+  # The search itself is exploratory.  The deterministic self-tests are a
+  # required CI gate.  A benchmark timeout is not treated as a failure.
+  # --------------------------------------------------------------------------
+  benchmark-cpsat:
+    name: CP-SAT sliding-window benchmark
+    runs-on: ubuntu-latest
+    needs: formal
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install OR-Tools
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install ortools
+
+      - name: Verify OR-Tools
+        run: |
+          python3 --version
+          python3 -c "from ortools.sat.python import cp_model; print('OR-Tools import: OK')"
+
+      - name: Verify CP-SAT finder exists
+        run: |
+          test -f benchmark/sha256sw_advanced_finder_fixed.py
+
+      - name: Python syntax check
+        run: |
+          python3 -m py_compile \
+            benchmark/sha256sw_advanced_finder_fixed.py
+
+      - name: Run CP-SAT self-tests
+        run: |
+          python3 benchmark/sha256sw_advanced_finder_fixed.py \
+            --self-test
+
+      - name: Run reduced-round CP-SAT smoke benchmark
+        shell: bash
+        run: |
+          set +e
+
+          python3 benchmark/sha256sw_advanced_finder_fixed.py \
+            --rounds 6 \
+            --meet-k 3 \
+            --timeout 10 \
+            --workers 2
+
+          status=$?
+
+          echo "CP-SAT smoke-test exit status: ${status}"
+
+          if [ "${status}" -ne 0 ]; then
+            echo "ERROR: CP-SAT benchmark process failed."
+            exit "${status}"
+          fi
+
+          exit 0
+
+      - name: Run meeting-point sweep
+        shell: bash
+        run: |
+          set +e
+
+          python3 benchmark/sha256sw_advanced_finder_fixed.py \
+            --rounds 6 \
+            --sweep 1,2,3,4,5 \
+            --timeout 5 \
+            --workers 2
+
+          status=$?
+
+          echo "CP-SAT sweep exit status: ${status}"
+
+          if [ "${status}" -ne 0 ]; then
+            echo "ERROR: CP-SAT sweep process failed."
+            exit "${status}"
+          fi
+
+          exit 0
+
+
+  # --------------------------------------------------------------------------
+  # Aggregate status
+  # --------------------------------------------------------------------------
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - c-tests
+      - formal
+      - collision-finder
+      - benchmark-equivalence
+      - benchmark-collision
+      - benchmark-cpsat
+
+    steps:
+      - name: Check required jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A results=(
+            [c-tests]="${{ needs.c-tests.result }}"
+            [formal]="${{ needs.formal.result }}"
+            [collision-finder]="${{ needs.collision-finder.result }}"
+            [benchmark-equivalence]="${{ needs.benchmark-equivalence.result }}"
+            [benchmark-collision]="${{ needs.benchmark-collision.result }}"
+            [benchmark-cpsat]="${{ needs.benchmark-cpsat.result }}"
+          )
+
+          failed=0
+
+          for job in "${!results[@]}"; do
+            echo "${job}: ${results[$job]}"
+
+            case "${results[$job]}" in
+              success)
+                ;;
+              *)
+                failed=1
+                ;;
+            esac
+          done
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "One or more required CI jobs failed."
+            exit 1
+          fi
+
+          echo "All CI jobs passed."
