@@ -4,36 +4,32 @@ sha256sw_advanced_finder_fixed.py
 
 Reduced-round SHA-256 sliding-window / bidirectional research harness.
 
-This is a research/benchmark implementation.  It does NOT claim to
-produce a 40-round SHA-256 collision within practical time.
+This is a research/benchmark implementation. It does NOT claim to
+produce a practical full-round SHA-256 collision.
 
-Features
---------
-* Correct NIST SHA-256 constants.
-* Concrete SHA-256 compression implementation.
-* Exact round inversion.
-* Sliding-window coordinates.
-* CP-SAT bit-level forward/backward model.
-* Structurally shared S_R collision boundary.
-* Meeting-point sweep.
-* Independent concrete witness verification.
-* Self-tests for constants, hashlib, inversion, and coordinates.
+The program contains two deliberately separate layers:
+
+1. A concrete SHA-256 implementation used as the reference implementation.
+2. A CP-SAT bit-level encoding used for reduced-round experiments.
+
+Any solver witness is independently recomputed with the concrete
+implementation before it is reported as valid.
 
 Dependencies
 ------------
-    pip install ortools
+    python -m pip install ortools
 
 Examples
 --------
-    python3 sha256sw_advanced_finder_fixed.py --self-test
+    python3 benchmark/sha256sw_advanced_finder_fixed.py --self-test
 
-    python3 sha256sw_advanced_finder_fixed.py \
+    python3 benchmark/sha256sw_advanced_finder_fixed.py \
         --rounds 6 --meet-k 3 --timeout 10
 
-    python3 sha256sw_advanced_finder_fixed.py \
+    python3 benchmark/sha256sw_advanced_finder_fixed.py \
         --rounds 40 --meet-k 20 --timeout 10
 
-    python3 sha256sw_advanced_finder_fixed.py \
+    python3 benchmark/sha256sw_advanced_finder_fixed.py \
         --rounds 6 --sweep 1,2,3,4,5 --timeout 10
 """
 
@@ -41,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import random
 import sys
 import time
 from typing import Dict, List, Sequence, Tuple
@@ -51,7 +48,7 @@ except ImportError:
     print(
         "ERROR: OR-Tools is required.\n"
         "Install with:\n"
-        "    pip install ortools",
+        "    python -m pip install ortools",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -81,11 +78,11 @@ K: Tuple[int, ...] = (
     0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
     0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC,
     0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
-    0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
+    0x983F5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
     0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967,
     0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
     0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85,
-    0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3,
+    0xA2BFE8A1, 0xA81A6642, 0xC24B8B70, 0xC76C51A3,
     0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
     0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5,
     0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
@@ -175,11 +172,6 @@ def sha256_compress(
     rounds: int = 64,
     iv: Sequence[int] = IV,
 ) -> List[State]:
-    """
-    Return states S_0 ... S_rounds.
-
-    This is the SHA-256 compression state before feed-forward addition.
-    """
     if len(iv) != 8:
         raise ValueError("IV must contain eight 32-bit words.")
 
@@ -230,21 +222,7 @@ def invert_round(
     w_i: int,
     k_i: int,
 ) -> State:
-    """
-    Given S_{i+1}, W_i and K_i, recover S_i exactly.
-    """
     ap, bp, cp, dp, ep, fp, gp, hp = next_state
-
-    # Forward:
-    #
-    # A' = T1 + T2
-    # B' = A
-    # C' = B
-    # D' = C
-    # E' = D + T1
-    # F' = E
-    # G' = F
-    # H' = G
 
     a = bp
     b = cp
@@ -282,18 +260,6 @@ def invert_round(
 # ============================================================================
 
 def state_to_window(state: State):
-    """
-    Represent
-
-        (A,B,C,D,E,F,G,H)
-
-    as
-
-        A-window = (D,C,B,A)
-        E-window = (H,G,F,E)
-
-    so that appending A_{i+4}, E_{i+4} advances the window.
-    """
     a, b, c, d, e, f, g, h = state
 
     return (
@@ -307,9 +273,6 @@ def window_to_state(
     E: Sequence[int],
     i: int,
 ) -> State:
-    """
-    Recover S_i from the four-window ending at coordinate i+3.
-    """
     return (
         A[i + 3],
         A[i + 2],
@@ -327,9 +290,6 @@ def forward_sw_concrete(
     rounds: int,
     iv: Sequence[int] = IV,
 ):
-    """
-    Concrete sliding-window forward execution.
-    """
     w = expand_schedule(block, rounds)
 
     A, E = state_to_window(tuple(iv))
@@ -369,18 +329,10 @@ def backward_sw_concrete(
     rounds: int,
     final_state: State,
 ):
-    """
-    Concrete backward reconstruction from S_rounds.
-    """
     w = expand_schedule(block, rounds)
 
     A: Dict[int, int] = {}
     E: Dict[int, int] = {}
-
-    # S_R corresponds to:
-    #
-    # A[R+3], A[R+2], A[R+1], A[R]
-    # E[R+3], E[R+2], E[R+1], E[R]
 
     a, b, c, d, e, f, g, h = final_state
 
@@ -430,11 +382,11 @@ BitVector = List[cp_model.IntVar]
 
 class CPSATSWFinder:
     """
-    CP-SAT bit-level sliding-window bidirectional model.
+    Bit-level CP-SAT sliding-window bidirectional model.
 
-    The collision state at S_R is represented by one shared set of
-    variables.  Both message paths independently constrain that same
-    state through their inverse trajectories.
+    A single collision boundary S_R is shared by both message paths.
+    Solver assignments are always independently verified with the
+    concrete SHA-256 implementation.
     """
 
     def __init__(
@@ -448,12 +400,13 @@ class CPSATSWFinder:
             raise ValueError("rounds must be between 1 and 64.")
 
         if not 1 <= meet_k < rounds:
-            raise ValueError(
-                "meet_k must satisfy 1 <= meet_k < rounds."
-            )
+            raise ValueError("meet_k must satisfy 1 <= meet_k < rounds.")
 
         if difference_round is None:
-            difference_round = 27 if rounds > 27 else (rounds // 2 if rounds > 1 else None)
+            difference_round = (
+                27 if rounds > 27
+                else (rounds // 2 if rounds > 1 else 0)
+            )
 
         if not 0 <= difference_round <= rounds:
             raise ValueError("difference_round outside round range.")
@@ -465,8 +418,6 @@ class CPSATSWFinder:
 
         self.model = cp_model.CpModel()
 
-        # Important: IV coordinates are CP-SAT BoolVars, not Python ints.
-        # This allows .Not() to be used uniformly by Boolean constraints.
         self.iv_bits: List[BitVector] = []
 
         for reg_idx, value in enumerate(self.iv):
@@ -513,33 +464,30 @@ class CPSATSWFinder:
         addends: Sequence[BitVector],
         prefix: str,
     ) -> BitVector:
-        """
-        Ripple-carry addition of arbitrary number of 32-bit vectors.
+        if not addends:
+            raise ValueError("At least one addend is required.")
 
-        Bit ordering is little-endian within each word.
-        """
         out: BitVector = []
 
-        # Carry is an integer CP-SAT variable after bit 0.
+        # For n one-bit operands plus a carry-in, the maximum carry into
+        # the next bit is floor(n / 2).  This is much tighter than using n.
+        n = len(addends)
+        carry_max = n // 2
         carry = 0
 
-        max_sum = len(addends)
-
         for bit in range(32):
-            terms = [x[bit] for x in addends]
-
             result = self.model.NewBoolVar(
                 f"{prefix}_bit_{bit}"
             )
 
             carry_out = self.model.NewIntVar(
                 0,
-                max_sum,
+                carry_max,
                 f"{prefix}_carry_{bit}"
             )
 
             self.model.Add(
-                sum(terms) + carry
+                sum(x[bit] for x in addends) + carry
                 == result + 2 * carry_out
             )
 
@@ -554,18 +502,7 @@ class CPSATSWFinder:
         b: BitVector,
         prefix: str,
     ) -> BitVector:
-        """
-        32-bit subtraction a-b modulo 2^32.
-
-        This uses the equivalent borrow/carry recurrence:
-
-            result + b + borrow_in
-                = a + 2*borrow_out
-
-        The final borrow is intentionally discarded.
-        """
         result: BitVector = []
-
         borrow = 0
 
         for bit in range(32):
@@ -599,9 +536,7 @@ class CPSATSWFinder:
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             self.model.AddBoolXOr([
                 a[bit],
@@ -621,17 +556,10 @@ class CPSATSWFinder:
         z: BitVector,
         prefix: str,
     ) -> BitVector:
-        """
-        q = Ch(x,y,z) bit-by-bit.
-
-        q = y if x else z
-        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             self.model.Add(
                 q == y[bit]
@@ -655,9 +583,7 @@ class CPSATSWFinder:
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             total = a[bit] + b[bit] + c[bit]
 
@@ -674,16 +600,8 @@ class CPSATSWFinder:
         return out
 
     # ----------------------------------------------------------------------
-    # Bit permutations / SHA functions
+    # SHA bit permutations
     # ----------------------------------------------------------------------
-
-    @staticmethod
-    def _rotbit(
-        x: BitVector,
-        bit: int,
-        rotation: int,
-    ):
-        return x[(bit + rotation) % 32]
 
     def _big_sigma0(
         self,
@@ -693,9 +611,7 @@ class CPSATSWFinder:
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             self.model.AddBoolXOr([
                 x[(bit + 2) % 32],
@@ -716,9 +632,7 @@ class CPSATSWFinder:
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             self.model.AddBoolXOr([
                 x[(bit + 6) % 32],
@@ -736,20 +650,10 @@ class CPSATSWFinder:
         x: BitVector,
         prefix: str,
     ) -> BitVector:
-        """
-        sigma0(x) = ROTR7(x) ^ ROTR18(x) ^ SHR3(x)
-
-        For little-endian bit indexing:
-            ROTR n bit b = x[(b+n) mod 32]
-
-        SHR3 contributes x[b+3] only for b <= 28.
-        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             literals = [
                 x[(bit + 7) % 32],
@@ -772,15 +676,10 @@ class CPSATSWFinder:
         x: BitVector,
         prefix: str,
     ) -> BitVector:
-        """
-        sigma1(x) = ROTR17(x) ^ ROTR19(x) ^ SHR10(x)
-        """
         out: BitVector = []
 
         for bit in range(32):
-            q = self.model.NewBoolVar(
-                f"{prefix}_{bit}"
-            )
+            q = self.model.NewBoolVar(f"{prefix}_{bit}")
 
             literals = [
                 x[(bit + 17) % 32],
@@ -856,10 +755,6 @@ class CPSATSWFinder:
         self,
         active_words_range: Tuple[int, int],
     ):
-        """
-        Force M1 != M2 while preventing trivial differences in words
-        that are not consumed by the requested round count.
-        """
         low, high = active_words_range
 
         low = max(0, low)
@@ -886,7 +781,6 @@ class CPSATSWFinder:
                     ])
 
                     difference_bits.append(d)
-
                 else:
                     self.model.Add(
                         self.m1[i][bit]
@@ -952,13 +846,7 @@ class CPSATSWFinder:
             )
 
             t1 = self._add_u32(
-                [
-                    h,
-                    big1,
-                    ch,
-                    k_bits,
-                    w[r],
-                ],
+                [h, big1, ch, k_bits, w[r]],
                 f"{prefix}_T1_{r}",
             )
 
@@ -975,10 +863,7 @@ class CPSATSWFinder:
             )
 
             t2 = self._add_u32(
-                [
-                    big0,
-                    maj,
-                ],
+                [big0, maj],
                 f"{prefix}_T2_{r}",
             )
 
@@ -1122,12 +1007,6 @@ class CPSATSWFinder:
         round_number: int,
         prefix: str,
     ):
-        """
-        Add S_round != S_round.
-
-        Crucially, every inequality is reified as a BoolVar before
-        being passed to AddBoolOr.
-        """
         differences = []
 
         for j in range(4):
@@ -1205,22 +1084,9 @@ class CPSATSWFinder:
             "path2_backward",
         )
 
-        # Join both forward and backward representations at k.
-        for path, Af, Ef, Ab, Eb in (
-            (
-                1,
-                self.Af1,
-                self.Ef1,
-                self.Ab1,
-                self.Eb1,
-            ),
-            (
-                2,
-                self.Af2,
-                self.Ef2,
-                self.Ab2,
-                self.Eb2,
-            ),
+        for Af, Ef, Ab, Eb in (
+            (self.Af1, self.Ef1, self.Ab1, self.Eb1),
+            (self.Af2, self.Ef2, self.Ab2, self.Eb2),
         ):
             for j in range(4):
                 for bit in range(32):
@@ -1234,28 +1100,12 @@ class CPSATSWFinder:
                         == Eb[self.meet_k + j][bit]
                     )
 
-        # Require the specified intermediate states to differ.
-        #
-        # For the normal F40 experiment this is S_27.
-        #
-        # If difference_round is on the backward side, its coordinates
-        # already exist in Ab/Eb.  Otherwise use the forward coordinates.
         if self.difference_round <= self.meet_k:
-            A1 = self.Af1
-            E1 = self.Ef1
-            A2 = self.Af2
-            E2 = self.Af2
+            A1, E1 = self.Af1, self.Ef1
+            A2, E2 = self.Af2, self.Ef2
         else:
-            A1 = self.Ab1
-            E1 = self.Eb1
-            A2 = self.Ab2
-            E2 = self.Eb2
-
-        # Correct the path-2 E reference.
-        if self.difference_round <= self.meet_k:
-            E2 = self.Ef2
-        else:
-            E2 = self.Eb2
+            A1, E1 = self.Ab1, self.Eb1
+            A2, E2 = self.Ab2, self.Eb2
 
         self._state_difference(
             A1,
@@ -1278,12 +1128,11 @@ class CPSATSWFinder:
         return {
             "variables": len(proto.variables),
             "constraints": len(proto.constraints),
-            "serialized_bytes": len(self.model.ModelStats()),
             "model_stats": self.model.ModelStats(),
         }
 
     # ----------------------------------------------------------------------
-    # Extract concrete message
+    # Extraction helpers
     # ----------------------------------------------------------------------
 
     @staticmethod
@@ -1321,13 +1170,10 @@ class CPSATSWFinder:
 
         solver.parameters.max_time_in_seconds = timeout_sec
         solver.parameters.num_search_workers = workers
-
-        # Keep output deterministic enough for reproducibility where
-        # practical, while still allowing parallel search.
         solver.parameters.log_search_progress = False
 
         print(
-            f"[*] CP-SAT SW-BIDIRECTIONAL BENCHMARK\n"
+            "[*] CP-SAT SW-BIDIRECTIONAL BENCHMARK\n"
             f"    rounds={self.rounds} | "
             f"k={self.meet_k} | "
             f"timeout={timeout_sec}s | "
@@ -1359,27 +1205,11 @@ class CPSATSWFinder:
                 "m2": None,
             }
 
-        m1 = self.extract_message(
-            solver,
-            self.m1,
-        )
+        m1 = self.extract_message(solver, self.m1)
+        m2 = self.extract_message(solver, self.m2)
 
-        m2 = self.extract_message(
-            solver,
-            self.m2,
-        )
-
-        s1 = sha256_compress(
-            m1,
-            self.rounds,
-            self.iv,
-        )
-
-        s2 = sha256_compress(
-            m2,
-            self.rounds,
-            self.iv,
-        )
+        s1 = sha256_compress(m1, self.rounds, self.iv)
+        s2 = sha256_compress(m2, self.rounds, self.iv)
 
         valid_collision = (
             s1[-1] == s2[-1]
@@ -1391,16 +1221,15 @@ class CPSATSWFinder:
             != s2[self.difference_round]
         )
 
-        valid = (
-            valid_collision
-            and valid_difference
-        )
+        valid = valid_collision and valid_difference
 
-        print("\n    Witness verification:")
-        print(f"      collision = {valid_collision}")
-        print(f"      S_{self.difference_round} difference = "
-              f"{valid_difference}")
-        print(f"      valid = {valid}")
+        print("\n    Independent witness verification:")
+        print(f"      collision       = {valid_collision}")
+        print(
+            f"      S_{self.difference_round} difference = "
+            f"{valid_difference}"
+        )
+        print(f"      valid           = {valid}")
 
         if valid:
             print(
@@ -1424,7 +1253,7 @@ class CPSATSWFinder:
 
 
 # ============================================================================
-# SELF-TESTS
+# TEST DATA
 # ============================================================================
 
 def abc_block() -> Tuple[int, ...]:
@@ -1445,6 +1274,17 @@ def abc_block() -> Tuple[int, ...]:
     )
 
 
+def random_block(rng: random.Random) -> Tuple[int, ...]:
+    return tuple(
+        rng.getrandbits(32)
+        for _ in range(16)
+    )
+
+
+# ============================================================================
+# CONCRETE SELF-TESTS
+# ============================================================================
+
 def test_sha256_abc():
     block = abc_block()
 
@@ -1461,9 +1301,7 @@ def test_sha256_abc():
         for i in range(8)
     )
 
-    expected = hashlib.sha256(
-        b"abc"
-    ).hexdigest()
+    expected = hashlib.sha256(b"abc").hexdigest()
 
     assert digest == expected, (
         f"SHA-256 mismatch:\n"
@@ -1474,19 +1312,10 @@ def test_sha256_abc():
 
 def test_round_inversion():
     block = abc_block()
-
     rounds = 40
 
-    states = sha256_compress(
-        block,
-        rounds,
-        IV,
-    )
-
-    w = expand_schedule(
-        block,
-        rounds,
-    )
+    states = sha256_compress(block, rounds, IV)
+    w = expand_schedule(block, rounds)
 
     for r in range(rounds - 1, -1, -1):
         recovered = invert_round(
@@ -1504,11 +1333,7 @@ def test_sliding_window():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(
-        block,
-        rounds,
-        IV,
-    )
+    states = sha256_compress(block, rounds, IV)
 
     A, E = forward_sw_concrete(
         block,
@@ -1520,11 +1345,7 @@ def test_sliding_window():
     assert len(E) == rounds + 4
 
     for i in range(rounds + 1):
-        recovered = window_to_state(
-            A,
-            E,
-            i,
-        )
+        recovered = window_to_state(A, E, i)
 
         assert recovered == states[i], (
             f"Sliding-window mismatch at state {i}"
@@ -1535,11 +1356,7 @@ def test_backward_window():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(
-        block,
-        rounds,
-        IV,
-    )
+    states = sha256_compress(block, rounds, IV)
 
     A, E = backward_sw_concrete(
         block,
@@ -1548,11 +1365,7 @@ def test_backward_window():
     )
 
     for i in range(rounds + 1):
-        recovered = window_to_state(
-            A,
-            E,
-            i,
-        )
+        recovered = window_to_state(A, E, i)
 
         assert recovered == states[i], (
             f"Backward reconstruction mismatch at state {i}"
@@ -1563,18 +1376,9 @@ def test_individual_inverse_rounds():
     block = abc_block()
     rounds = 40
 
-    states = sha256_compress(
-        block,
-        rounds,
-        IV,
-    )
+    states = sha256_compress(block, rounds, IV)
+    w = expand_schedule(block, rounds)
 
-    w = expand_schedule(
-        block,
-        rounds,
-    )
-
-    # Test several individual rounds independently.
     for r in (
         0,
         1,
@@ -1595,6 +1399,293 @@ def test_individual_inverse_rounds():
         assert recovered == states[r]
 
 
+def test_random_concrete_rounds():
+    rng = random.Random(0x53484132)
+
+    for rounds in (1, 2, 4, 8, 16, 32, 40, 64):
+        for _ in range(5):
+            block = random_block(rng)
+
+            states = sha256_compress(
+                block,
+                rounds,
+                IV,
+            )
+
+            w = expand_schedule(
+                block,
+                rounds,
+            )
+
+            for r in range(rounds):
+                assert (
+                    invert_round(
+                        states[r + 1],
+                        w[r],
+                        K[r],
+                    )
+                    == states[r]
+                )
+
+            A, E = forward_sw_concrete(
+                block,
+                rounds,
+                IV,
+            )
+
+            for i in range(rounds + 1):
+                assert (
+                    window_to_state(A, E, i)
+                    == states[i]
+                )
+
+            Ab, Eb = backward_sw_concrete(
+                block,
+                rounds,
+                states[-1],
+            )
+
+            for i in range(rounds + 1):
+                assert (
+                    window_to_state(Ab, Eb, i)
+                    == states[i]
+                )
+
+
+# ============================================================================
+# CP-SAT PRIMITIVE EQUIVALENCE TESTS
+# ============================================================================
+
+def _make_fixed_word(
+    model: cp_model.CpModel,
+    value: int,
+    prefix: str,
+) -> BitVector:
+    bits = []
+
+    for bit in range(32):
+        b = model.NewBoolVar(f"{prefix}_{bit}")
+
+        model.Add(
+            b == ((value >> bit) & 1)
+        )
+
+        bits.append(b)
+
+    return bits
+
+
+def _solve_and_word(
+    model: cp_model.CpModel,
+    bits: BitVector,
+) -> int:
+    solver = cp_model.CpSolver()
+
+    solver.parameters.max_time_in_seconds = 5.0
+    solver.parameters.num_search_workers = 1
+
+    status = solver.Solve(model)
+
+    assert status in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+    ), solver.StatusName(status)
+
+    value = 0
+
+    for bit, b in enumerate(bits):
+        value |= int(solver.Value(b)) << bit
+
+    return value & MASK32
+
+
+def test_cpsat_bit_primitives():
+    rng = random.Random(0x43505341)
+
+    for case in range(4):
+        model = cp_model.CpModel()
+        finder = CPSATSWFinder(
+            rounds=2,
+            meet_k=1,
+        )
+
+        # Use the independent model only as a holder for the primitive
+        # methods, while constructing this tiny equivalence model.
+        finder.model = model
+
+        x = rng.getrandbits(32)
+        y = rng.getrandbits(32)
+        z = rng.getrandbits(32)
+
+        xb = _make_fixed_word(model, x, f"x_{case}")
+        yb = _make_fixed_word(model, y, f"y_{case}")
+        zb = _make_fixed_word(model, z, f"z_{case}")
+
+        add = finder._add_u32(
+            [xb, yb, zb],
+            f"add_{case}",
+        )
+
+        sub = finder._sub_u32(
+            xb,
+            yb,
+            f"sub_{case}",
+        )
+
+        ch = finder._ch(
+            xb,
+            yb,
+            zb,
+            f"ch_{case}",
+        )
+
+        maj = finder._maj(
+            xb,
+            yb,
+            zb,
+            f"maj_{case}",
+        )
+
+        s0 = finder._big_sigma0(
+            xb,
+            f"s0_{case}",
+        )
+
+        s1 = finder._big_sigma1(
+            xb,
+            f"s1_{case}",
+        )
+
+        ss0 = finder._small_sigma0(
+            xb,
+            f"ss0_{case}",
+        )
+
+        ss1 = finder._small_sigma1(
+            xb,
+            f"ss1_{case}",
+        )
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 5.0
+        solver.parameters.num_search_workers = 1
+
+        status = solver.Solve(model)
+
+        assert status in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ), solver.StatusName(status)
+
+        def value(bits):
+            out = 0
+
+            for bit, b in enumerate(bits):
+                out |= int(solver.Value(b)) << bit
+
+            return out & MASK32
+
+        assert value(add) == u32(x + y + z)
+        assert value(sub) == u32(x - y)
+        assert value(ch) == Ch(x, y, z)
+        assert value(maj) == Maj(x, y, z)
+        assert value(s0) == Sigma0(x)
+        assert value(s1) == Sigma1(x)
+        assert value(ss0) == sigma0(x)
+        assert value(ss1) == sigma1(x)
+
+
+def test_cpsat_trajectory_equivalence():
+    """
+    Pin a complete random message into the CP-SAT model and verify the
+    modeled forward trajectory against the concrete implementation.
+
+    This is the critical regression test for the bit-level encoding.
+    """
+
+    rng = random.Random(0x5452414A)
+
+    rounds = 6
+
+    finder = CPSATSWFinder(
+        rounds=rounds,
+        meet_k=3,
+        difference_round=3,
+    )
+
+    finder.m1 = finder._new_message("test_path1")
+    finder.m2 = finder._new_message("test_path2")
+
+    block = random_block(rng)
+
+    # Pin both messages to the same concrete block.
+    for i, word in enumerate(block):
+        for bit in range(32):
+            value = (word >> bit) & 1
+
+            finder.model.Add(
+                finder.m1[i][bit] == value
+            )
+
+            finder.model.Add(
+                finder.m2[i][bit] == value
+            )
+
+    w1 = finder.build_schedule(
+        finder.m1,
+        "test_schedule",
+    )
+
+    Af, Ef = finder._forward_path(
+        w1,
+        "test_forward",
+    )
+
+    solver = cp_model.CpSolver()
+
+    solver.parameters.max_time_in_seconds = 20.0
+    solver.parameters.num_search_workers = 1
+
+    status = solver.Solve(finder.model)
+
+    assert status in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+    ), solver.StatusName(status)
+
+    concrete = sha256_compress(
+        block,
+        rounds,
+        IV,
+    )
+
+    def bits_to_word(bits):
+        value = 0
+
+        for bit, b in enumerate(bits):
+            value |= int(solver.Value(b)) << bit
+
+        return value & MASK32
+
+    for r, state in enumerate(concrete):
+        modeled = (
+            bits_to_word(Af[r + 3]),
+            bits_to_word(Af[r + 2]),
+            bits_to_word(Af[r + 1]),
+            bits_to_word(Af[r]),
+            bits_to_word(Ef[r + 3]),
+            bits_to_word(Ef[r + 2]),
+            bits_to_word(Ef[r + 1]),
+            bits_to_word(Ef[r]),
+        )
+
+        assert modeled == state, (
+            f"CP-SAT forward trajectory mismatch at S_{r}:\n"
+            f"modeled  = {modeled}\n"
+            f"concrete = {state}"
+        )
+
+
 def run_self_tests():
     print("=" * 78)
     print("SHA256SW SELF-TEST")
@@ -1613,16 +1704,25 @@ def run_self_tests():
     print("[PASS] Individual inverse-round checks passed")
 
     test_sliding_window()
-    print("[PASS] Sliding-window coordinates match all 41 states")
+    print("[PASS] Forward sliding-window coordinates verified")
 
     test_backward_window()
-    print("[PASS] Backward sliding-window reconstruction matches")
+    print("[PASS] Backward sliding-window reconstruction verified")
+
+    test_random_concrete_rounds()
+    print("[PASS] Randomized concrete regression tests passed")
+
+    test_cpsat_bit_primitives()
+    print("[PASS] CP-SAT bit primitives match concrete functions")
+
+    test_cpsat_trajectory_equivalence()
+    print("[PASS] CP-SAT forward trajectory matches concrete SHA-256")
 
     print("\n[PASS] ALL SELF-TESTS PASSED")
 
 
 # ============================================================================
-# SINGLE BENCHMARK
+# BENCHMARK
 # ============================================================================
 
 def run_benchmark(
@@ -1634,7 +1734,10 @@ def run_benchmark(
     active_words_range: Tuple[int, int] = (0, 4),
 ):
     if difference_round is None:
-        difference_round = 27 if rounds > 27 else (rounds // 2 if rounds > 1 else None)
+        difference_round = (
+            27 if rounds > 27
+            else (rounds // 2 if rounds > 1 else 0)
+        )
 
     print("=" * 78)
     print("SHA256SW BIDIRECTIONAL BENCHMARK")
@@ -1655,7 +1758,7 @@ def run_benchmark(
 
     build_time = time.perf_counter() - t0
 
-    proto = finder.model.Proto()
+    stats = finder.stats()
 
     print(
         f"Rounds={rounds} | "
@@ -1665,8 +1768,8 @@ def run_benchmark(
     )
 
     print(f"Build time       : {build_time:.3f}s")
-    print(f"Variables        : {len(proto.variables):,}")
-    print(f"Constraints      : {len(proto.constraints):,}")
+    print(f"Variables        : {stats['variables']:,}")
+    print(f"Constraints      : {stats['constraints']:,}")
 
     return finder.solve(
         timeout_sec=timeout,
@@ -1686,10 +1789,8 @@ def parse_sweep(
     for item in value.split(","):
         item = item.strip()
 
-        if not item:
-            continue
-
-        result.append(int(item))
+        if item:
+            result.append(int(item))
 
     if not result:
         raise ValueError("Empty sweep.")
@@ -1705,7 +1806,10 @@ def run_sweep(
     workers: int = 4,
 ):
     if difference_round is None:
-        difference_round = 27 if rounds > 27 else (rounds // 2 if rounds > 1 else None)
+        difference_round = (
+            27 if rounds > 27
+            else (rounds // 2 if rounds > 1 else 0)
+        )
 
     print("=" * 78)
     print("SHA256SW MEETING-POINT SWEEP")
@@ -1746,23 +1850,20 @@ def run_sweep(
         )
 
         build = time.perf_counter() - t0
-
-        proto = finder.model.Proto()
+        stats = finder.stats()
 
         result = finder.solve(
             timeout_sec=timeout,
             workers=workers,
         )
 
-        row = {
+        rows.append({
             "k": k,
             "build": build,
-            "variables": len(proto.variables),
-            "constraints": len(proto.constraints),
+            "variables": stats["variables"],
+            "constraints": stats["constraints"],
             **result,
-        }
-
-        rows.append(row)
+        })
 
     print("\n" + "=" * 78)
     print("SWEEP SUMMARY")
@@ -1844,7 +1945,7 @@ def main():
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="Run all concrete self-tests.",
+        help="Run all concrete and CP-SAT self-tests.",
     )
 
     parser.add_argument(
@@ -1856,6 +1957,15 @@ def main():
 
     args = parser.parse_args()
 
+    if not 1 <= args.rounds <= 64:
+        parser.error("--rounds must be between 1 and 64.")
+
+    if args.workers < 1:
+        parser.error("--workers must be >= 1.")
+
+    if args.timeout <= 0:
+        parser.error("--timeout must be > 0.")
+
     if args.self_test:
         run_self_tests()
         return
@@ -1865,6 +1975,14 @@ def main():
         if args.meet_k is not None
         else args.rounds // 2
     )
+
+    if args.rounds == 1:
+        meet_k = 0
+
+    if not 1 <= meet_k < args.rounds:
+        parser.error(
+            f"--meet-k must satisfy 1 <= meet-k < {args.rounds}"
+        )
 
     if args.sweep is not None:
         points = parse_sweep(args.sweep)
