@@ -17,6 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
   # ==========================================================================
   # C TEST SUITE
   # ==========================================================================
@@ -59,6 +60,7 @@ jobs:
         run: |
           make test
 
+
   # ==========================================================================
   # FORMAL VERIFICATION
   # ==========================================================================
@@ -81,6 +83,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y z3
+
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
@@ -109,6 +112,7 @@ jobs:
           echo "Generated SMT files:"
           printf '  %s\n' "${files[@]}"
 
+
   # ==========================================================================
   # LEGACY / GENERAL COLLISION FINDER
   # ==========================================================================
@@ -132,6 +136,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y z3
+
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
@@ -169,16 +174,21 @@ jobs:
 
           echo "Reduced-round solver exit status: ${status}"
 
-          if [ "${status}" -eq 0 ]; then
-            echo "Collision search succeeded."
-          elif [ "${status}" -eq 1 ]; then
-            echo "No collision under the supplied constraints."
-          elif [ "${status}" -eq 2 ]; then
-            echo "Solver returned unknown/timeout."
-          else
-            echo "Collision finder encountered an actual error."
-            exit "${status}"
-          fi
+          case "${status}" in
+            0)
+              echo "Collision search succeeded."
+              ;;
+            1)
+              echo "No collision under the supplied constraints."
+              ;;
+            2)
+              echo "Solver returned unknown/timeout."
+              ;;
+            *)
+              echo "Collision finder encountered an actual error."
+              exit "${status}"
+              ;;
+          esac
 
           exit 0
 
@@ -262,14 +272,18 @@ jobs:
 
           echo "Floyd exit status: ${status}"
 
-          if [ "${status}" -eq 0 ]; then
-            echo "Cycle detected."
-          elif [ "${status}" -eq 1 ]; then
-            echo "No cycle within iteration budget."
-          else
-            echo "Floyd finder failed."
-            exit "${status}"
-          fi
+          case "${status}" in
+            0)
+              echo "Cycle detected."
+              ;;
+            1)
+              echo "No cycle within iteration budget."
+              ;;
+            *)
+              echo "Floyd finder failed."
+              exit "${status}"
+              ;;
+          esac
 
           exit 0
 
@@ -282,6 +296,7 @@ jobs:
             reduced_round_collision.smt2
             collision_window.smt2
           if-no-files-found: warn
+
 
   # ==========================================================================
   # SHA256SW CP-SAT RESEARCH
@@ -311,6 +326,7 @@ jobs:
         run: |
           python3 --version
           python3 -c "from ortools.sat.python import cp_model; print('OR-Tools import: OK')"
+          python3 -c "import ortools; print('OR-Tools:', ortools.__version__)"
 
       - name: Verify SHA256SW source exists
         run: |
@@ -321,10 +337,21 @@ jobs:
           python3 -m py_compile \
             benchmark/sha256sw_advanced_finder_fixed.py
 
+      # ----------------------------------------------------------------------
+      # SELF TESTS
+      # ----------------------------------------------------------------------
+
       - name: Run SHA256SW self-tests
         run: |
+          set -o pipefail
+
           python3 benchmark/sha256sw_advanced_finder_fixed.py \
-            --self-test
+            --self-test \
+            | tee sha256sw_selftest.txt
+
+      # ----------------------------------------------------------------------
+      # CP-SAT SMOKE TEST
+      # ----------------------------------------------------------------------
 
       - name: Run CP-SAT smoke test
         run: |
@@ -335,7 +362,11 @@ jobs:
             --meet-k 2 \
             --timeout 5 \
             --workers 2 \
-            | tee sha256sw_smoke.txt
+            2>&1 | tee sha256sw_smoke.txt
+
+      # ----------------------------------------------------------------------
+      # MEETING-POINT SWEEP
+      # ----------------------------------------------------------------------
 
       - name: Run meeting-point sweep
         run: |
@@ -346,7 +377,97 @@ jobs:
             --sweep 1,2,3,4,5 \
             --timeout 5 \
             --workers 2 \
-            | tee sha256sw_sweep.txt
+            2>&1 | tee sha256sw_sweep.txt
+
+      # ----------------------------------------------------------------------
+      # EXTRACT RESULTS
+      #
+      # This makes the CI useful even if the Python program itself does not
+      # produce much terminal output.
+      # ----------------------------------------------------------------------
+
+      - name: Analyze SHA256SW output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "# SHA256SW CP-SAT Research"
+            echo
+            echo "## Status"
+            echo
+            echo "✅ Self-tests completed successfully."
+            echo "✅ CP-SAT smoke test completed successfully."
+            echo "✅ Meeting-point sweep completed successfully."
+            echo
+            echo "## Environment"
+            echo
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Branch | \`${GITHUB_REF_NAME}\` |"
+            echo "| Python | \`$(python3 --version)\` |"
+            echo "| OR-Tools | \`$(python3 -c 'import ortools; print(ortools.__version__)')\` |"
+            echo "| CPU cores | \`$(nproc)\` |"
+            echo
+            echo "## Self-test output"
+            echo
+            echo '```text'
+            cat sha256sw_selftest.txt
+            echo '```'
+            echo
+            echo "## CP-SAT smoke-test output"
+            echo
+            echo '```text'
+            if [ -s sha256sw_smoke.txt ]; then
+              cat sha256sw_smoke.txt
+            else
+              echo "(No stdout was produced by the solver.)"
+            fi
+            echo '```'
+            echo
+            echo "## Meeting-point sweep output"
+            echo
+            echo '```text'
+            if [ -s sha256sw_sweep.txt ]; then
+              cat sha256sw_sweep.txt
+            else
+              echo "(No stdout was produced by the sweep.)"
+            fi
+            echo '```'
+          } > sha256sw_summary.md
+
+          cat sha256sw_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # ----------------------------------------------------------------------
+      # SHOW RAW OUTPUT DIRECTLY IN ACTION LOG
+      # ----------------------------------------------------------------------
+
+      - name: Print SHA256SW research results
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "============================================================"
+          echo "SHA256SW SELF-TEST OUTPUT"
+          echo "============================================================"
+          cat sha256sw_selftest.txt 2>/dev/null || true
+
+          echo
+          echo "============================================================"
+          echo "SHA256SW CP-SAT SMOKE TEST OUTPUT"
+          echo "============================================================"
+          cat sha256sw_smoke.txt 2>/dev/null || true
+
+          echo
+          echo "============================================================"
+          echo "SHA256SW MEETING-POINT SWEEP OUTPUT"
+          echo "============================================================"
+          cat sha256sw_sweep.txt 2>/dev/null || true
+
+      # ----------------------------------------------------------------------
+      # ENVIRONMENT INFORMATION
+      # ----------------------------------------------------------------------
 
       - name: Collect research metadata
         run: |
@@ -372,35 +493,9 @@ jobs:
             date -u +"%Y-%m-%dT%H:%M:%SZ"
           } | tee sha256sw_environment.txt
 
-      - name: Build research summary
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "# SHA256SW CP-SAT Research"
-            echo
-            echo "## Run"
-            echo
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Python: \`$(python3 --version)\`"
-            echo "- OR-Tools: \`$(python3 -c 'import ortools; print(ortools.__version__)')\`"
-            echo "- CPU cores: \`$(nproc)\`"
-            echo
-            echo "## Meeting-point sweep"
-            echo
-            echo '```text'
-            cat sha256sw_sweep.txt
-            echo '```'
-            echo
-            echo "## CP-SAT smoke test"
-            echo
-            echo '```text'
-            cat sha256sw_smoke.txt
-            echo '```'
-          } > sha256sw_summary.md
-
-          cat sha256sw_summary.md >> "$GITHUB_STEP_SUMMARY"
+      # ----------------------------------------------------------------------
+      # UPLOAD EVERYTHING
+      # ----------------------------------------------------------------------
 
       - name: Upload SHA256SW research results
         if: always()
@@ -408,11 +503,13 @@ jobs:
         with:
           name: sha256sw-cpsat-${{ github.run_number }}
           path: |
-            sha256sw_summary.md
-            sha256sw_environment.txt
+            sha256sw_selftest.txt
             sha256sw_smoke.txt
             sha256sw_sweep.txt
+            sha256sw_summary.md
+            sha256sw_environment.txt
           if-no-files-found: warn
+
 
   # ==========================================================================
   # SYMBOLIC EQUIVALENCE BENCHMARK
@@ -437,6 +534,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y z3
+
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
@@ -474,6 +572,7 @@ jobs:
             sha256sw_benchmark.csv
           if-no-files-found: warn
 
+
   # ==========================================================================
   # REDUCED-ROUND COLLISION BENCHMARK
   # ==========================================================================
@@ -497,6 +596,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y z3
+
           python3 -m pip install --upgrade pip
           python3 -m pip install z3-solver
 
